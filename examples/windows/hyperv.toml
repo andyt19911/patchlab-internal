@@ -15,9 +15,9 @@ provider = "hyperv"
 # One golden VHDX per Windows build you run in production. Sandboxes boot
 # from differencing disks, so these files are only ever read.
 images = [
-  'D:\PatchLab Internal\Golden\ws2022-std.vhdx',
-  'D:\PatchLab Internal\Golden\ws2019-std.vhdx',
-  'D:\PatchLab Internal\Golden\win11-23h2-ent.vhdx',
+  'D:\PatchLabInternal\Golden\ws2022-std.vhdx',
+  'D:\PatchLabInternal\Golden\ws2019-std.vhdx',
+  'D:\PatchLabInternal\Golden\win11-23h2-ent.vhdx',
 ]
 memory = "4g"
 cpus = "2"
@@ -28,7 +28,7 @@ max_reboots = 4
 
 [sandbox.hyperv]
 switch = "PatchLabInternal-NAT"         # NAT/isolated switch with internet access for Windows Update
-vm_path = 'D:\PatchLab Internal\VMs'
+vm_path = 'D:\PatchLabInternal\VMs'
 generation = 2
 secure_boot_template = "MicrosoftWindows"
 tpm = false

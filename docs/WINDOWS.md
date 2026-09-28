@@ -91,7 +91,7 @@ For each build (e.g. Server 2022, Server 2019, Windows 11 23H2 Enterprise):
    `Set-ItemProperty HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU -Name NoAutoUpdate -Value 1`
    (create the key first). PatchLab Internal's Windows Update calls still work with this set.
 6. Shut down cleanly (not sysprep; the VM should boot straight to a usable state) and
-   copy the VHDX to `D:\PatchLab Internal\Golden\`. Mark it read-only: sandboxes only ever
+   copy the VHDX to `D:\PatchLabInternal\Golden\`. Mark it read-only: sandboxes only ever
    read it through differencing disks.
 
 **Each month, after the update has reached Broad**, refresh the golden images
@@ -104,10 +104,10 @@ Edit `examples/windows/hyperv.toml` (image paths, switch, VM folder), then
 from an **elevated** prompt:
 
 ```powershell
-cd C:\PatchLab Internal            # a clone of this repository
+cd C:\PatchLabInternal            # a clone of this repository
 $env:PATCHLAB_INTERNAL_GUEST_PASSWORD = (Get-Credential Administrator).GetNetworkCredential().Password
 python -m patchlab_internal validate examples\windows\hyperv.toml
-python -m patchlab_internal run examples\windows\hyperv.toml --image D:\PatchLab Internal\Golden\ws2022-std.vhdx `
+python -m patchlab_internal run examples\windows\hyperv.toml --image D:\PatchLabInternal\Golden\ws2022-std.vhdx `
        --patch windows-update --verify-rollback --keep-on-failure
 ```
 
@@ -133,10 +133,10 @@ Rollback modes (`[patch] rollback`):
 
 ```powershell
 # As the account the task will run as (DPAPI ties the file to it):
-Get-Credential Administrator | Export-Clixml C:\ProgramData\PatchLab Internal\guest-cred.xml
+Get-Credential Administrator | Export-Clixml C:\ProgramData\PatchLabInternal\guest-cred.xml
 
 $action  = New-ScheduledTaskAction -Execute powershell.exe -Argument `
-  '-NoProfile -ExecutionPolicy Bypass -File C:\PatchLab Internal\examples\windows\Invoke-PatchTuesday.ps1 -ReportShare \\files\PatchLab Internal -WebhookUrl https://...'
+  '-NoProfile -ExecutionPolicy Bypass -File C:\PatchLabInternal\examples\windows\Invoke-PatchTuesday.ps1 -ReportShare \\files\PatchLabInternal -WebhookUrl https://...'
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Tuesday -At 20:00
 Register-ScheduledTask -TaskName 'PatchLab Internal - Patch Tuesday' -Action $action -Trigger $trigger `
   -User 'CONTOSO\svc-patchlab' -Password '...' -RunLevel Highest

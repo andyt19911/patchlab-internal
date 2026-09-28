@@ -6,7 +6,7 @@
 #>
 $ErrorActionPreference = 'Stop'
 $root = $env:PATCHLAB_INTERNAL_GUEST_DIR
-if (-not $root) { $root = Join-Path $env:ProgramData 'PatchLab Internal' }
+if (-not $root) { $root = Join-Path $env:ProgramData 'PatchLabInternal' }
 $file = Join-Path $root 'cbs-baseline.json'
 if (-not (Test-Path $file)) { Write-Output 'no pre-patch package baseline was recorded'; exit 2 }
 # Assign, then cast: in Windows PowerShell 5.1, wrapping the ConvertFrom-Json pipeline

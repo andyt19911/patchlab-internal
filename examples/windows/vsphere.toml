@@ -28,7 +28,7 @@ server = "vcenter.example.com"
 base_snapshot = "patchlab-internal-base"
 cluster = "Lab-Cluster"
 datastore = "lab-ds01"
-folder = "PatchLab Internal"
+folder = "PatchLabInternal"
 network = "PatchLabInternal-Isolated"
 insecure = false
 

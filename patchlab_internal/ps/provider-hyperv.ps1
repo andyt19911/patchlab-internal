@@ -7,8 +7,8 @@
   access, WinRM or firewall rules for PatchLab Internal to reach it.
 
   [sandbox.hyperv] options:
-    switch                = "PatchLab Internal"          virtual switch (needs internet for Windows Update)
-    vm_path               = "D:\PatchLab Internal\VMs"   where sandbox VMs and disks live
+    switch                = "PatchLabInternal"          virtual switch (needs internet for Windows Update)
+    vm_path               = "D:\PatchLabInternal\VMs"   where sandbox VMs and disks live
     generation            = 2
     secure_boot_template  = "MicrosoftWindows"
     tpm                   = false               true for Windows 11 images
@@ -71,7 +71,7 @@ function Invoke-PLCreate($a) {
     Get-VMIntegrationService -VM $vm | Where-Object { $_.Name -match 'Guest Service' } |
         Enable-VMIntegrationService -ErrorAction SilentlyContinue
     Start-VM -VM $vm
-    @{ name = $a.name; path = $dir; guest_dir = 'C:\ProgramData\PatchLab Internal' }
+    @{ name = $a.name; path = $dir; guest_dir = 'C:\ProgramData\PatchLabInternal' }
 }
 
 function Invoke-PLExec($a) {

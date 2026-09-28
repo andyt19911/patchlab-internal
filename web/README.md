@@ -34,7 +34,7 @@ patchlab-internal web status              # enabled? installed? where do reports
 `patchlab-internal setup` also chooses the **reports folder** (where every run, from the CLI or the
 browser, writes its report) and the **configs folder** (where the front end looks for
 `.toml` configs). Settings live in `~/.config/patchlab_internal/settings.toml`
-(`%APPDATA%\PatchLab Internal\settings.toml` on Windows, or `$PATCHLAB_INTERNAL_HOME`).
+(`%APPDATA%\PatchLabInternal\settings.toml` on Windows, or `$PATCHLAB_INTERNAL_HOME`).
 
 ## Security
 

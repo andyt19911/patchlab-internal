@@ -218,7 +218,7 @@ class WindowsSandbox:
         self.run_id = run_id
         self.cfg = cfg
         self.started = False
-        self.guest_dir = r"C:\ProgramData\PatchLab Internal"
+        self.guest_dir = r"C:\ProgramData\PatchLabInternal"
 
     @property
     def caps(self) -> dict:

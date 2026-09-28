@@ -8,7 +8,7 @@
       1. runs PatchLab Internal with the config's windows-update patch on every golden image,
          including rollback verification;
       2. copies the report folder to -ReportShare;
-      3. writes an Application event log entry (source "PatchLab Internal") for monitoring/SIEM:
+      3. writes an Application event log entry (source "PatchLabInternal") for monitoring/SIEM:
          1000 PASS, 1001 WARN, 1002 FAIL, 1003 ERROR;
       4. optionally posts a summary card to a Microsoft Teams channel through a
          Workflows webhook (-WebhookUrl).
@@ -17,19 +17,19 @@
 
 .PARAMETER CredentialFile
     Guest administrator credential saved with:
-        Get-Credential Administrator | Export-Clixml C:\ProgramData\PatchLab Internal\guest-cred.xml
+        Get-Credential Administrator | Export-Clixml C:\ProgramData\PatchLabInternal\guest-cred.xml
     Run that as the account the scheduled task uses: DPAPI ties the file to
     that account on this machine.
 
 .EXAMPLE
-    .\Invoke-PatchTuesday.ps1 -Force -ReportShare \\files\PatchLab Internal\Reports
+    .\Invoke-PatchTuesday.ps1 -Force -ReportShare \\files\PatchLabInternal\Reports
 #>
 [CmdletBinding()]
 param(
     [string]$Config = (Join-Path $PSScriptRoot 'hyperv.toml'),
     [string]$PatchLabInternalRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
-    [string]$CredentialFile = (Join-Path $env:ProgramData 'PatchLab Internal\guest-cred.xml'),
-    [string]$OutDir = (Join-Path $env:ProgramData 'PatchLab Internal\reports'),
+    [string]$CredentialFile = (Join-Path $env:ProgramData 'PatchLabInternal\guest-cred.xml'),
+    [string]$OutDir = (Join-Path $env:ProgramData 'PatchLabInternal\reports'),
     [string]$ReportShare,
     [string]$WebhookUrl,
     [string]$Python = 'python',
@@ -91,11 +91,11 @@ $summaryLines = @($problem | Where-Object { $_ }) + @(foreach ($t in $report.tar
 # Write-EventLog exists in Windows PowerShell 5.1 (what the scheduled task uses), not in 7.
 if (Get-Command Write-EventLog -ErrorAction SilentlyContinue) {
     $eventIds = @{ PASS = 1000; WARN = 1001; FAIL = 1002; ERROR = 1003 }
-    if (-not [Diagnostics.EventLog]::SourceExists('PatchLab Internal')) {
-        New-EventLog -LogName Application -Source PatchLab Internal
+    if (-not [Diagnostics.EventLog]::SourceExists('PatchLabInternal')) {
+        New-EventLog -LogName Application -Source PatchLabInternal
     }
     $entryType = if ($report.verdict -in 'FAIL', 'ERROR') { 'Error' } elseif ($report.verdict -eq 'WARN') { 'Warning' } else { 'Information' }
-    Write-EventLog -LogName Application -Source PatchLab Internal -EventId $eventIds[$report.verdict] -EntryType $entryType `
+    Write-EventLog -LogName Application -Source PatchLabInternal -EventId $eventIds[$report.verdict] -EntryType $entryType `
         -Message ("PatchLab Internal $($report.verdict): $($report.patch.label)`n`n" + ($summaryLines -join "`n") + "`n`nReport: $reportLink")
 } else {
     Write-Warning 'Write-EventLog is unavailable in this PowerShell edition; skipping the event log entry'

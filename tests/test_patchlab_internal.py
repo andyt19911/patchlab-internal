@@ -308,7 +308,7 @@ class WindowsConfigTests(unittest.TestCase):
             config.parse_patch_spec("windows-update", None, "linux")
 
     def test_target_names_and_sizes(self):
-        self.assertEqual(runner.slugify(r"D:\PatchLab Internal\Golden\ws2022-std.vhdx"), "ws2022-std")
+        self.assertEqual(runner.slugify(r"D:\PatchLabInternal\Golden\ws2022-std.vhdx"), "ws2022-std")
         self.assertEqual(runner.slugify("ubuntu:24.04"), "ubuntu-24.04")
         self.assertEqual(windows._size_mb("4g"), 4096)
         self.assertEqual(windows._size_mb("512MB"), 512)

@@ -31,7 +31,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(s.reports_path(), Path("reports"))
 
     def test_round_trip_keeps_awkward_paths(self):
-        s = settings.Settings(reports_dir=r"C:\Users\o'brien\PatchLab Internal reports", configs_dir="/srv/patch lab")
+        s = settings.Settings(reports_dir=r"C:\Users\o'brien\PatchLabInternal reports", configs_dir="/srv/patch lab")
         s.web.enabled, s.web.port = True, 9000
         settings.save(s)
         back = settings.load()

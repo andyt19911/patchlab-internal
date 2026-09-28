@@ -271,7 +271,7 @@ class App:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PatchLab Internal"
+    server_version = "PatchLabInternal"
     sys_version = ""
     app: App = None   # set on the subclass created by make_server
 

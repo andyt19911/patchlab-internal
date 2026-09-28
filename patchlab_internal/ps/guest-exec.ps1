@@ -16,7 +16,7 @@ function Invoke-PatchLabInternalGuestScript {
     )
     $ErrorActionPreference = 'Stop'
     $root = $env:PATCHLAB_INTERNAL_GUEST_DIR
-    if (-not $root) { $root = Join-Path $env:ProgramData 'PatchLab Internal' }
+    if (-not $root) { $root = Join-Path $env:ProgramData 'PatchLabInternal' }
     New-Item -ItemType Directory -Force -Path $root | Out-Null
 
     $id = [guid]::NewGuid().ToString('N')

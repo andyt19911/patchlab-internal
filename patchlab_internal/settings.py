@@ -2,7 +2,7 @@
 
 Stored as TOML in:
   $PATCHLAB_INTERNAL_HOME/settings.toml                  if PATCHLAB_INTERNAL_HOME is set
-  %APPDATA%\\PatchLab Internal\\settings.toml            on Windows
+  %APPDATA%\\PatchLabInternal\\settings.toml            on Windows
   $XDG_CONFIG_HOME/patchlab_internal/settings.toml elsewhere (~/.config/patchlab_internal)
 """
 
@@ -21,7 +21,7 @@ def settings_dir() -> Path:
     if os.environ.get("PATCHLAB_INTERNAL_HOME"):
         return Path(os.environ["PATCHLAB_INTERNAL_HOME"])
     if sys.platform == "win32" and os.environ.get("APPDATA"):
-        return Path(os.environ["APPDATA"]) / "PatchLab Internal"
+        return Path(os.environ["APPDATA"]) / "PatchLabInternal"
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "patchlab_internal"
 

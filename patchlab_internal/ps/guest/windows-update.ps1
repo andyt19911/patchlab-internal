@@ -36,14 +36,14 @@ $wantedIds = @($cfg.categories | ForEach-Object {
 $kbFilter = @($cfg.kbs | Where-Object { $_ })
 
 $session = New-Object -ComObject Microsoft.Update.Session
-$session.ClientApplicationID = 'PatchLab Internal'
+$session.ClientApplicationID = 'PatchLabInternal'
 $searcher = $session.CreateUpdateSearcher()
 $muServiceId = '7971f918-a847-4430-9279-4a52d1efe18d'
 $searcher.ServerSelection = 2   # ssWindowsUpdate: bypass WSUS policy
 if ($cfg.microsoft_update) {
     try {
         $sm = New-Object -ComObject Microsoft.Update.ServiceManager
-        $sm.ClientApplicationID = 'PatchLab Internal'
+        $sm.ClientApplicationID = 'PatchLabInternal'
         $null = $sm.AddService2($muServiceId, 7, '')
         $searcher.ServerSelection = 3   # ssOthers
         $searcher.ServiceID = $muServiceId

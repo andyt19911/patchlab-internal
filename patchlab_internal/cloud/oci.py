@@ -45,7 +45,7 @@ def batch_for_powershell(script: str, line: int = 7000) -> str:
     b64 = base64.b64encode(b"\xef\xbb\xbf" + script.encode("utf-8")).decode("ascii")
     ident = uuid.uuid4().hex
     lines = ["@echo off",
-             "set D=%ProgramData%\\PatchLab Internal",
+             "set D=%ProgramData%\\PatchLabInternal",
              'if not exist "%D%" mkdir "%D%"',
              f"set F=%D%\\oc-{ident}",
              "("]

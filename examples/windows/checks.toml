@@ -5,29 +5,29 @@
 
 [[deploy]]
 src = "tests"
-dest = 'C:\PatchLab Internal\tests'
+dest = 'C:\PatchLabInternal\tests'
 
 [[checks]]
 name = "platform-tests"
 category = "functional"
 # Pester results are compared test by test (JUnit or NUnit XML both work).
-results = 'junit:C:\PatchLab Internal\results\platform.xml'
+results = 'junit:C:\PatchLabInternal\results\platform.xml'
 timeout = 900
 run = '''
 $ErrorActionPreference = 'Stop'
-New-Item -ItemType Directory -Force -Path 'C:\PatchLab Internal\results' | Out-Null
+New-Item -ItemType Directory -Force -Path 'C:\PatchLabInternal\results' | Out-Null
 Import-Module Pester -MinimumVersion 3.4.0
-$out = 'C:\PatchLab Internal\results\platform.xml'
+$out = 'C:\PatchLabInternal\results\platform.xml'
 if ((Get-Module Pester).Version.Major -ge 5) {
     $c = New-PesterConfiguration
-    $c.Run.Path = 'C:\PatchLab Internal\tests'
+    $c.Run.Path = 'C:\PatchLabInternal\tests'
     $c.Run.PassThru = $true
     $c.TestResult.Enabled = $true
     $c.TestResult.OutputFormat = 'JUnitXml'
     $c.TestResult.OutputPath = $out
     $r = Invoke-Pester -Configuration $c
 } else {
-    $r = Invoke-Pester -Script 'C:\PatchLab Internal\tests' -OutputFile $out -OutputFormat NUnitXml -PassThru
+    $r = Invoke-Pester -Script 'C:\PatchLabInternal\tests' -OutputFile $out -OutputFormat NUnitXml -PassThru
 }
 exit $r.FailedCount
 '''

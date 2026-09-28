@@ -39,7 +39,7 @@ from ..sandbox import ExecResult, SandboxError
 
 PS_DIR = Path(__file__).resolve().parent.parent / "ps"
 LINUX_GUEST_DIR = "/var/tmp/patchlab"
-WINDOWS_GUEST_DIR = r"C:\ProgramData\PatchLab Internal"
+WINDOWS_GUEST_DIR = r"C:\ProgramData\PatchLabInternal"
 TAG_KEY, RUN_TAG_KEY, SOURCE_TAG_KEY = "patchlab_internal", "patchlab-internal-run", "patchlab-internal-source"
 # Every resource of a clone carries its exact name, so teardown can match it
 # exactly instead of by prefix (a prefix would also hit "<name>-replica").
@@ -264,7 +264,7 @@ function ConvertTo-PL64([string]$t) {{ [Convert]::ToBase64String([Text.Encoding]
 $text = "rc=$($r.exit_code)`nto=$([int][bool]$r.timed_out)`nout=$(ConvertTo-PL64 $r.stdout)`nerr=$(ConvertTo-PL64 $r.stderr)`n"
 if ($text.Length -le {int(inline_limit)}) {{ '@@PLRESULT'; $text.TrimEnd(); '@@PLEND' }}
 else {{
-    $p = Join-Path (Join-Path $env:ProgramData 'PatchLab Internal') ('r-' + [guid]::NewGuid().ToString('N') + '.txt')
+    $p = Join-Path (Join-Path $env:ProgramData 'PatchLabInternal') ('r-' + [guid]::NewGuid().ToString('N') + '.txt')
     [IO.File]::WriteAllText($p, $text)
     "@@PLRESULTFILE $p $((Get-Item $p).Length)"
 }}

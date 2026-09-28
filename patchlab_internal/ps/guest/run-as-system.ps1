@@ -9,7 +9,7 @@
 #>
 $ErrorActionPreference = 'Stop'
 $root = $env:PATCHLAB_INTERNAL_GUEST_DIR
-if (-not $root) { $root = Join-Path $env:ProgramData 'PatchLab Internal' }
+if (-not $root) { $root = Join-Path $env:ProgramData 'PatchLabInternal' }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 
 $id = [guid]::NewGuid().ToString('N')
@@ -36,7 +36,7 @@ Set-Content -Path "$rcFile" -Value `$code
 [IO.File]::WriteAllText($launcher, $launch, $utf8)
 
 $taskName = "PatchLabInternal-$id"
-$taskPath = '\PatchLab Internal\'
+$taskPath = '\PatchLabInternal\'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcher`""
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest

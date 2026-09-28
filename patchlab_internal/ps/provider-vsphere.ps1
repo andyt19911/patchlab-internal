@@ -15,7 +15,7 @@
     base_snapshot  = "patchlab-internal-base"     snapshot on each template VM to clone from
     cluster        = "Lab"               or resource_pool = "..." / vmhost = "..."
     datastore      = "lab-ds01"
-    folder         = "PatchLab Internal"          VM folder for sandboxes
+    folder         = "PatchLabInternal"          VM folder for sandboxes
     network        = "PatchLabInternal-Isolated" port group (needs internet for Windows Update)
     insecure       = false               true to accept self-signed vCenter certificates
 #>
@@ -79,7 +79,7 @@ function Invoke-PLCreate($a) {
         Get-NetworkAdapter -VM $vm | Set-NetworkAdapter -NetworkName $o.network -Confirm:$false | Out-Null
     }
     Start-VM -VM $vm -Confirm:$false | Out-Null
-    @{ name = $a.name; path = "$($vm.Folder)/$($a.name)"; guest_dir = 'C:\ProgramData\PatchLab Internal' }
+    @{ name = $a.name; path = "$($vm.Folder)/$($a.name)"; guest_dir = 'C:\ProgramData\PatchLabInternal' }
 }
 
 function Invoke-PLExec($a) {
