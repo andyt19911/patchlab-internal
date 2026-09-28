@@ -332,6 +332,8 @@ patchlab_internal/
   docs/WINDOWS.md       Windows setup and operating guide
   docs/CLOUD.md         cloud cloning: isolation, permissions, per-cloud setup
   docs/ROADMAP.md       where PatchLab Internal goes next: phases, priorities, metrics
+  docs/ESTATE_SURVEY.md the six repos it maintains: stack, CI, audits, gaps
+  docs/DESIGN.md        estate maintenance design: updates, build health, drift, dashboard
   patchlab_internal/settings.py  settings written by `patchlab-internal setup` / `patchlab-internal web enable|disable`
   web/                  OPTIONAL front end package (patchlab_internal_web): server, static UI, tests
   tests/                unit and integration tests
