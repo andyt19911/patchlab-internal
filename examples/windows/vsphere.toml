@@ -1,0 +1,41 @@
+# Windows patch testing on VMware vSphere (same checks as hyperv.toml).
+#
+#   $env:PATCHLAB_INTERNAL_VCENTER_USER = 'svc-patchlab@vsphere.local'
+#   $env:PATCHLAB_INTERNAL_VCENTER_PASSWORD = '...'
+#   $env:PATCHLAB_INTERNAL_GUEST_PASSWORD = '...'
+#   python -m patchlab_internal run examples\windows\vsphere.toml --patch windows-update --verify-rollback
+#
+# Needs VMware PowerCLI (Install-Module VMware.PowerCLI). See docs/WINDOWS.md.
+
+name = "Windows fleet - monthly quality update (vSphere)"
+include = ["checks.toml"]
+
+[sandbox]
+platform = "windows"
+provider = "vsphere"
+# Template VMs (ordinary VMs, each with a "patchlab-internal-base" snapshot) that
+# sandboxes are linked-cloned from.
+images = ["tmpl-ws2022-std", "tmpl-ws2019-std", "tmpl-win11-23h2"]
+memory = "4g"
+cpus = "2"
+username = "Administrator"
+boot_timeout = 2700
+settle_seconds = 120
+max_reboots = 4
+
+[sandbox.vsphere]
+server = "vcenter.example.com"
+base_snapshot = "patchlab-internal-base"
+cluster = "Lab-Cluster"
+datastore = "lab-ds01"
+folder = "PatchLab Internal"
+network = "PatchLabInternal-Isolated"
+insecure = false
+
+[patch]
+kind = "windows-update"
+categories = ["Security Updates", "Critical Updates", "Update Rollups", "Updates"]
+include_preview = false
+microsoft_update = true
+max_passes = 3
+rollback = "uninstall"

@@ -1,0 +1,24 @@
+# Clone a production Windows VM on Azure into a throw-away resource group.
+#
+#   az login
+#   python -m patchlab_internal run examples/cloud/azure-windows.toml --verify-rollback
+
+name = "Azure: finance app servers - monthly Windows updates"
+include = ["../windows/checks.toml"]
+
+[sandbox]
+platform = "windows"
+provider = "azure"
+images = ["rg-finance-prod/finance-app-01"]   # resource-group/vm-name, or a full resource ID
+boot_timeout = 2700
+settle_seconds = 120
+
+[sandbox.azure]
+subscription = "00000000-0000-0000-0000-000000000000"
+subnet_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-patchlab-net/providers/Microsoft.Network/virtualNetworks/vnet-patchlab/subnets/snet-isolated"
+staging_account = "patchlabstaging01"
+staging_container = "patchlab_internal"
+
+[patch]
+kind = "windows-update"
+rollback = "uninstall"

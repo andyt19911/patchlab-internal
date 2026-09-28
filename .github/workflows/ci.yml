@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (Python + PowerShell 5.1 compatibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pyflakes
+        run: |
+          python -m pip install --quiet pyflakes
+          python -m pyflakes patchlab_internal tests web
+      - name: PowerShell scripts run on Windows PowerShell 5.1
+        shell: pwsh
+        run: ./tools/lint_powershell.ps1
+
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    env:
+      PATCHLAB_INTERNAL_SKIP_CLI_SYNTAX: "1"   # covered by the cli-syntax job
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Core, Windows and cloud tests
+        run: python -m unittest discover -s tests -v
+      - name: Front-end tests
+        run: python -m unittest discover -s web/tests -v
+
+  cli-syntax:
+    name: Cloud CLI command syntax (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Install the OCI CLI
+        run: python -m pip install --quiet oci-cli
+      - name: CLI versions
+        run: |
+          aws --version
+          az version
+          gcloud --version
+          oci --version
+      - name: Replay every aws/az/gcloud/oci command PatchLab Internal builds
+        run: python -m unittest tests.test_cloud.CLISyntaxTest -v
+
+  browser:
+    name: Front end in a real browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright + Chromium
+        run: |
+          python -m pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+      - name: Front-end tests including the browser test
+        run: python -m unittest discover -s web/tests -v
+
+  e2e-linux:
+    name: End to end on Docker (urlkit example)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: A real fix passes (with rollback verified)
+        run: >-
+          python -m patchlab_internal run examples/urlkit/patchlab.toml --image ubuntu:24.04
+          --patch source:examples/urlkit/patches/fix-defaults-and-bounds.patch --verify-rollback --out reports
+      - name: A regressing patch is caught
+        run: |
+          set +e
+          python -m patchlab_internal run examples/urlkit/patchlab.toml --image ubuntu:24.04 \
+            --patch source:examples/urlkit/patches/always-send-auth-header.patch --out reports
+          code=$?
+          if [ "$code" -ne 1 ]; then echo "expected exit 1 (FAIL), got $code"; exit 1; fi
+      - name: Pending OS updates are tested
+        run: python -m patchlab_internal run examples/urlkit/patchlab.toml --image ubuntu:24.04 --patch os-packages --out reports
+      - name: No sandboxes left behind
+        run: |
+          left=$(docker ps -aq --filter label=patchlab_internal=1)
+          if [ -n "$left" ]; then docker ps -a --filter label=patchlab_internal=1; exit 1; fi
+      - name: Reports in the job summary
+        if: always()
+        run: cat reports/*/report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-reports
+          path: reports/
+          retention-days: 14
+
+  package:
+    name: Build and install the packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        run: |
+          python -m pip install --quiet build
+          python -m build --outdir dist .
+          python -m build --outdir dist web
+          ls -l dist
+      - name: "Core only: the front end stays optional"
+        run: |
+          python -m venv /tmp/core && /tmp/core/bin/pip install --quiet dist/patchlab_internal-*.whl
+          export PATCHLAB_INTERNAL_HOME=$(mktemp -d)
+          /tmp/core/bin/patchlab-internal --version
+          /tmp/core/bin/patchlab-internal web status | tee status.txt
+          grep -q "disabled, not installed" status.txt
+          /tmp/core/bin/patchlab-internal web enable
+          set +e; /tmp/core/bin/patchlab-internal web; code=$?; set -e
+          test "$code" -eq 64
+      - name: Core + front end serves pages
+        run: |
+          python -m venv /tmp/full && /tmp/full/bin/pip install --quiet dist/patchlab_internal-*.whl dist/patchlab_internal_web-*.whl
+          export PATCHLAB_INTERNAL_HOME=$(mktemp -d) PATCHLAB_INTERNAL_WEB_TOKEN=ci-token
+          /tmp/full/bin/patchlab-internal setup --web --port 8766 --reports-dir "$PWD/reports" --configs-dir "$PWD/examples"
+          /tmp/full/bin/patchlab-internal web & pid=$!
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:8766/static/app.js >/dev/null && break; sleep 1; done
+          curl -fs -H "Authorization: Bearer ci-token" http://127.0.0.1:8766/api/configs | python -c "import json,sys; c=json.load(sys.stdin)['configs']; print(len(c), 'configs'); assert len(c) >= 8"
+          # Background jobs in a non-interactive shell ignore SIGINT, so stop it with SIGTERM.
+          kill $pid; wait $pid || true

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patchlab-internal-web"
+version = "0.1.0"
+description = "Optional browser front end for PatchLab Internal."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary"}
+dependencies = ["patchlab_internal>=0.1.0"]   # install the core first: pip install . ./web
+
+[tool.setuptools.packages.find]
+include = ["patchlab_internal_web"]
+
+[tool.setuptools.package-data]
+patchlab_internal_web = ["static/*"]

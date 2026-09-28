@@ -1,0 +1,22 @@
+diff --git a/client.c b/client.c
+index 03aa970..05c470e 100644
+--- a/client.c
++++ b/client.c
+@@ -37,11 +37,11 @@ bool uk_request_headers(const uk_client_t *client, uk_action_t action, uk_list_t
+   if (!uk_list_add(headers, "Accept", "application/json"))
+     return false;
+ 
+-  /* The login request is what obtains the token, so it never carries one. */
+-  if (action != UK_LOGIN) {
+-    snprintf(buffer, sizeof (buffer), "Bearer %s", client->token);
+-    if (!uk_list_add(headers, "Authorization", buffer))
+-      return false;
+-  }
++  /* Always send the Authorization header: some API gateways reject any
++   * request without one, including the login. */
++  (void) action;
++  snprintf(buffer, sizeof (buffer), "Bearer %s", client->token);
++  if (!uk_list_add(headers, "Authorization", buffer))
++    return false;
+   return true;
+ }

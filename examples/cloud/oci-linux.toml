@@ -1,0 +1,21 @@
+# Clone a production Oracle Linux instance on OCI and test a targeted fix.
+#
+#   python -m patchlab_internal run examples/cloud/oci-linux.toml --patch os-packages:openssl,openssl-libs
+
+name = "OCI: ERP database host - OpenSSL fix"
+include = ["linux-checks.toml"]
+
+[sandbox]
+platform = "linux"
+provider = "oci"
+images = ["ocid1.instance.oc1.uk-london-1.aaaaexample"]
+boot_timeout = 900
+settle_seconds = 30
+
+[sandbox.oci]
+profile = "DEFAULT"
+region = "uk-london-1"
+compartment_id = "ocid1.compartment.oc1..aaaapatchlab"
+source_compartment_id = "ocid1.compartment.oc1..aaaaproduction"
+subnet_id = "ocid1.subnet.oc1.uk-london-1.aaaaisolated"
+nsg_ids = ["ocid1.networksecuritygroup.oc1.uk-london-1.aaaanoinbound"]

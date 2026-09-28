@@ -1,0 +1,78 @@
+# Checks shared by hyperv.toml and vsphere.toml (pulled in with `include`).
+# Each `run` is PowerShell executed inside the guest; exit code 0 = pass.
+# They run before the patch (baseline) and again after the patch and its
+# reboots, so only NEW failures count against the patch.
+
+[[deploy]]
+src = "tests"
+dest = 'C:\PatchLab Internal\tests'
+
+[[checks]]
+name = "platform-tests"
+category = "functional"
+# Pester results are compared test by test (JUnit or NUnit XML both work).
+results = 'junit:C:\PatchLab Internal\results\platform.xml'
+timeout = 900
+run = '''
+$ErrorActionPreference = 'Stop'
+New-Item -ItemType Directory -Force -Path 'C:\PatchLab Internal\results' | Out-Null
+Import-Module Pester -MinimumVersion 3.4.0
+$out = 'C:\PatchLab Internal\results\platform.xml'
+if ((Get-Module Pester).Version.Major -ge 5) {
+    $c = New-PesterConfiguration
+    $c.Run.Path = 'C:\PatchLab Internal\tests'
+    $c.Run.PassThru = $true
+    $c.TestResult.Enabled = $true
+    $c.TestResult.OutputFormat = 'JUnitXml'
+    $c.TestResult.OutputPath = $out
+    $r = Invoke-Pester -Configuration $c
+} else {
+    $r = Invoke-Pester -Script 'C:\PatchLab Internal\tests' -OutputFile $out -OutputFormat NUnitXml -PassThru
+}
+exit $r.FailedCount
+'''
+
+[[checks]]
+name = "boot-to-usable"
+category = "smoke"
+# Fails if the desktop/session stack or core networking is not up.
+run = '''
+$ErrorActionPreference = 'Stop'
+$ip = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' }
+if (-not $ip) { Write-Output 'no usable IPv4 address'; exit 1 }
+if (-not (Resolve-DnsName -Name localhost -ErrorAction SilentlyContinue)) { Write-Output 'DNS client cannot resolve localhost'; exit 1 }
+Write-Output "ok: $($ip.IPAddress -join ', ')"
+'''
+
+[[checks]]
+name = "windows-update-agent"
+category = "os"
+critical = false
+# Next month's patching depends on the update stack still working.
+run = '''
+$s = New-Object -ComObject Microsoft.Update.Session
+$h = $s.QueryHistory(0, 20) | Where-Object { $_.ResultCode -ge 4 }
+Get-Service wuauserv | Select-Object Name, Status, StartType | Format-Table | Out-String | Write-Output
+if ($h) { $h | ForEach-Object { Write-Output "failed: $($_.Title) 0x$('{0:X8}' -f $_.HResult)" } }
+exit 0
+'''
+
+# ---- Add your line-of-business checks below -------------------------------
+# [[checks]]
+# name = "payroll-web"
+# category = "application"
+# run = '''
+# $r = Invoke-WebRequest -Uri 'https://localhost/payroll/health' -UseBasicParsing -TimeoutSec 60
+# if ($r.StatusCode -ne 200 -or $r.Content -notmatch '"status":"ok"') { exit 1 }
+# '''
+#
+# [[checks]]
+# name = "payroll-db"
+# category = "application"
+# run = '''
+# Invoke-Sqlcmd -ServerInstance localhost -Query 'SELECT COUNT(*) FROM dbo.Employees' -ErrorAction Stop
+# '''
+
+[health]
+# Also hash your application's config so an update that rewrites it is caught.
+watch_paths = ['C:\Windows\System32\drivers\etc', 'C:\inetpub\wwwroot\web.config']

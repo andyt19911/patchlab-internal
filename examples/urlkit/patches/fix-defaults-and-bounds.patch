@@ -1,0 +1,31 @@
+diff --git a/client.c b/client.c
+index 03aa970..0990f41 100644
+--- a/client.c
++++ b/client.c
+@@ -5,7 +5,7 @@
+ #include "urlkit.h"
+ 
+ void uk_client_defaults(uk_client_t *client) {
+-  memset(client, 0, sizeof (client));
++  memset(client, 0, sizeof (*client));
+ 
+   snprintf(client->user_agent, sizeof (client->user_agent), "urlkit/1.0");
+   client->timeout_seconds = 30;
+diff --git a/encode.c b/encode.c
+index ac08d50..5342508 100644
+--- a/encode.c
++++ b/encode.c
+@@ -17,11 +17,11 @@ int uk_encode(const char *in, char *out, size_t outlen) {
+ 
+   for (p = (const unsigned char *) in; *p; p++) {
+     if (unreserved(*p)) {
+-      if (used + 1 > outlen)
++      if (used + 1 >= outlen)
+         return -1;
+       out[used++] = (char) *p;
+     } else {
+-      if (used + 3 > outlen)
++      if (used + 3 >= outlen)
+         return -1;
+       out[used++] = '%';
+       out[used++] = hex[*p >> 4];

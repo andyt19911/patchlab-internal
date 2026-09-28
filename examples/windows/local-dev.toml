@@ -1,0 +1,33 @@
+# Try the Windows pipeline without any VMs: the "local" provider runs the
+# PowerShell guest code on this machine (PowerShell 7 on Windows, Linux or
+# macOS). It has no isolation, reboots or checkpoints, so use it only to
+# develop checks and configs, never with real patches.
+#
+#   python -m patchlab_internal run examples/windows/local-dev.toml \
+#       --patch script:examples/windows/local/patches/bad-hotfix.ps1
+
+name = "Windows pipeline (local dev mode)"
+
+[sandbox]
+platform = "windows"
+provider = "local"
+images = ["dev"]
+
+[[deploy]]
+src = "local/app"
+dest = "app"                 # relative = inside the local sandbox directory
+
+[[checks]]
+name = "app-selftest"
+category = "application"
+results = "tap"
+run = '& (Join-Path $env:PATCHLAB_INTERNAL_GUEST_DIR "app/selftest.ps1"); exit $LASTEXITCODE'
+
+[[checks]]
+name = "config-is-valid-json"
+category = "smoke"
+run = 'Get-Content -Raw (Join-Path $env:PATCHLAB_INTERNAL_GUEST_DIR "app/config.json") | ConvertFrom-Json | Out-Null'
+
+[health]
+# The OS probes need a real Windows guest.
+enabled = false

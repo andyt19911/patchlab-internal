@@ -1,0 +1,23 @@
+# Clone a production Linux VM on Google Cloud and test pending OS updates
+# (including kernel updates: the clone really reboots).
+#
+#   gcloud auth login
+#   python -m patchlab_internal run examples/cloud/gcp-linux.toml --patch os-packages
+
+name = "GCP: orders API - OS updates"
+include = ["linux-checks.toml"]
+
+[sandbox]
+platform = "linux"
+provider = "gcp"
+images = ["europe-west2-a/orders-api-1"]    # zone/instance
+boot_timeout = 900
+settle_seconds = 30
+
+[sandbox.gcp]
+project = "acme-prod"
+subnet = "projects/acme-patchlab/regions/europe-west2/subnetworks/patchlab-isolated"
+network_tags = ["patchlab-internal-isolated"]
+
+[health]
+watch_paths = ["/etc"]

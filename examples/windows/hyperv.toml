@@ -1,0 +1,43 @@
+# Windows patch testing on Hyper-V.
+#
+# Run from an elevated prompt on the Hyper-V host:
+#   $env:PATCHLAB_INTERNAL_GUEST_PASSWORD = '<golden image local admin password>'
+#   python -m patchlab_internal run examples\windows\hyperv.toml --patch windows-update --verify-rollback
+#
+# See docs/WINDOWS.md for building the golden images and the host switch.
+
+name = "Windows fleet - monthly quality update"
+include = ["checks.toml"]
+
+[sandbox]
+platform = "windows"
+provider = "hyperv"
+# One golden VHDX per Windows build you run in production. Sandboxes boot
+# from differencing disks, so these files are only ever read.
+images = [
+  'D:\PatchLab Internal\Golden\ws2022-std.vhdx',
+  'D:\PatchLab Internal\Golden\ws2019-std.vhdx',
+  'D:\PatchLab Internal\Golden\win11-23h2-ent.vhdx',
+]
+memory = "4g"
+cpus = "2"
+username = "Administrator"      # password: PATCHLAB_INTERNAL_GUEST_PASSWORD
+boot_timeout = 2700             # cumulative updates can take a long time to finish on reboot
+settle_seconds = 120            # let delayed-start services come up before comparing
+max_reboots = 4
+
+[sandbox.hyperv]
+switch = "PatchLabInternal-NAT"         # NAT/isolated switch with internet access for Windows Update
+vm_path = 'D:\PatchLab Internal\VMs'
+generation = 2
+secure_boot_template = "MicrosoftWindows"
+tpm = false
+
+[patch]
+# What Windows Autopatch / Windows Update for Business quality rings install.
+kind = "windows-update"
+categories = ["Security Updates", "Critical Updates", "Update Rollups", "Updates"]
+include_preview = false         # true to test the optional "D-week" preview release
+microsoft_update = true         # include .NET and other Microsoft product updates
+max_passes = 3                  # re-scan after reboots (some updates chain)
+rollback = "uninstall"          # or "checkpoint", or a PowerShell back-out script

@@ -1,0 +1,63 @@
+# Example: copy to .github/workflows/patch-test.yml to run PatchLab Internal on every
+# pull request that adds or changes a patch. GitHub-hosted Ubuntu runners
+# ship with Docker, so no extra setup is needed.
+name: Patch test
+
+on:
+  pull_request:
+    paths:
+      - "patchlab_internal/examples/urlkit/patches/**"
+  workflow_dispatch:
+    inputs:
+      patch:
+        description: "Patch spec, e.g. os-packages:openssl or source:path/to.patch"
+        required: true
+        default: "os-packages"
+
+jobs:
+  patch-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Work out which patches to test
+        id: patches
+        run: |
+          if [ -n "${{ github.event.inputs.patch }}" ]; then
+            echo "specs=${{ github.event.inputs.patch }}" >> "$GITHUB_OUTPUT"
+          else
+            specs=$(git diff --name-only --diff-filter=AM origin/${{ github.base_ref }}...HEAD \
+                      -- 'patchlab_internal/examples/urlkit/patches/*.patch' \
+                    | sed 's|^patchlab_internal/|source:|' | tr '\n' ' ')
+            echo "specs=$specs" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run PatchLab Internal
+        working-directory: patchlab_internal
+        run: |
+          status=0
+          for spec in ${{ steps.patches.outputs.specs }}; do
+            python -m patchlab_internal run examples/urlkit/patchlab.toml \
+              --patch "$spec" --verify-rollback --out reports || status=1
+          done
+          cat reports/*/report.md >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patchlab-internal-reports
+          path: patchlab_internal/reports/
+
+      - name: Clean up any leftovers
+        if: always()
+        working-directory: patchlab_internal
+        run: python -m patchlab_internal gc

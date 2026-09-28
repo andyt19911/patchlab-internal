@@ -1,0 +1,33 @@
+# Clone a production Windows server on AWS, apply this month's updates,
+# test, report and destroy the clone.
+#
+#   aws sso login --profile patchlab_internal
+#   python -m patchlab_internal run examples/cloud/aws-windows.toml --verify-rollback
+#
+# See docs/CLOUD.md for the isolated subnet, IAM permissions and SSM setup.
+
+name = "AWS: payroll web tier - monthly Windows updates"
+include = ["../windows/checks.toml"]
+
+[sandbox]
+platform = "windows"
+provider = "aws"
+# Assets to clone: instance IDs, or tag:Key=Value / a Name tag value (must match exactly one).
+images = ["i-0123456789abcdef0", "tag:Name=payroll-web-02"]
+boot_timeout = 2700
+settle_seconds = 120
+# Stop jobs that must never run from a clone (it has production's config and data).
+setup = ["Get-Service PayrollBatch -ErrorAction SilentlyContinue | Stop-Service -Force -PassThru | Set-Service -StartupType Disabled"]
+
+[sandbox.aws]
+region = "eu-west-2"
+profile = "patchlab_internal"
+subnet_id = "subnet-0isolated000000000"      # private subnet, no route to production
+security_group_ids = ["sg-0noinbound0000000"] # no inbound rules
+instance_profile = "PatchLabInternalSSM"             # AmazonSSMManagedInstanceCore (+ staging bucket access)
+staging_bucket = "patchlab-internal-staging-123456789012"
+clone_timeout = 3600
+
+[patch]
+kind = "windows-update"
+rollback = "uninstall"

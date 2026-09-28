@@ -1,0 +1,83 @@
+# PatchLab Internal config for the urlkit example (see README.md).
+#
+#   python -m patchlab_internal run examples/urlkit/patchlab.toml \
+#       --patch source:examples/urlkit/patches/fix-defaults-and-bounds.patch
+
+name = "urlkit (example C library)"
+
+[sandbox]
+# Every image is tested in parallel. Add the distros you actually run.
+images = ["ubuntu:24.04", "ubuntu:22.04"]   # e.g. add "debian:12", "rockylinux:9"
+memory = "1g"
+cpus = "2"
+# Setup runs once per image and is cached as a local image, so repeat runs
+# start in seconds. Change it (or pass --no-cache) to rebuild.
+setup = [
+  "apt-get update -q",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends build-essential cmake patch ca-certificates",
+]
+
+[[deploy]]
+src = "src"                      # the library under test
+dest = "/opt/app"
+exclude = ["build"]
+
+[[deploy]]
+src = "tests"
+dest = "/opt/tests"
+
+# Checks run before the patch (baseline) and after it (patched). A check that
+# passed before and fails after is a regression; a check that was already
+# failing is reported as pre-existing and does not block the patch.
+
+[[checks]]
+name = "build"
+category = "build"
+run = """
+rm -rf /tmp/build && \
+cmake -S /opt/app -B /tmp/build -DCMAKE_BUILD_TYPE=Debug -Wno-dev && \
+cmake --build /tmp/build -j2
+"""
+
+[[checks]]
+name = "unit-tests"
+category = "functional"
+results = "tap"                  # per-test comparison
+run = """
+cc -std=c99 -Wall -I/opt/app /opt/tests/test_urlkit.c /tmp/build/liburlkit.a -o /tmp/test_uk && /tmp/test_uk
+"""
+perf_tolerance = 0.5
+
+[[checks]]
+name = "memory-safety"
+category = "security"
+# Fails only on AddressSanitizer / UndefinedBehaviorSanitizer reports; plain
+# assertion failures are the job of unit-tests.
+run = """
+cd /opt/app && \
+cc -std=c99 -g -fsanitize=address,undefined -fno-omit-frame-pointer -I. \
+   *.c /opt/tests/test_urlkit.c -o /tmp/test_uk_asan || exit 1
+ASAN_OPTIONS=detect_leaks=0 /tmp/test_uk_asan >/dev/null 2>/tmp/sanitizer.txt
+if grep -E 'ERROR: AddressSanitizer|runtime error:' /tmp/sanitizer.txt; then exit 1; fi
+echo "no sanitizer reports"
+"""
+
+[[checks]]
+name = "compiler-warnings"
+category = "quality"
+critical = false                 # new warnings raise a WARN, not a FAIL
+# Both phases run in the same sandbox, so a check can record the baseline
+# value in a file and compare against it after the patch.
+run = """
+cd /opt/app
+for f in *.c; do cc -std=c99 -O2 -Wall -Wextra -c "$f" -o /dev/null; done 2>/tmp/warnings.txt
+n=$(grep -c 'warning:' /tmp/warnings.txt)
+[ -f /tmp/warnings.baseline ] || echo "$n" > /tmp/warnings.baseline
+base=$(cat /tmp/warnings.baseline)
+echo "$n warnings (baseline: $base)"; cat /tmp/warnings.txt
+[ "$n" -le "$base" ]
+"""
+
+[health]
+watch_paths = ["/etc"]
+lib_scan_paths = ["/usr/bin", "/usr/sbin", "/usr/local/bin"]

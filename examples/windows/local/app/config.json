@@ -1,0 +1,6 @@
+{
+  "version": "2.0.3",
+  "database": { "connectionString": "Server=sql01;Database=Payroll;Integrated Security=true" },
+  "tls": { "minimumVersion": "1.2" },
+  "auth": { "mode": "Kerberos" }
+}

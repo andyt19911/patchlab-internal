@@ -1,0 +1,39 @@
+# Checks for Linux clones (shared by the cloud examples via `include`).
+# Each `run` is a shell script executed as root; exit code 0 = pass.
+
+[[checks]]
+name = "systemd-healthy"
+category = "os"
+# No more failed units than before the patch (stored on the clone between phases).
+run = '''
+n=$(systemctl --failed --no-legend --plain 2>/dev/null | wc -l)
+[ -f /var/tmp/patchlab_internal/failed-units.baseline ] || echo "$n" > /var/tmp/patchlab_internal/failed-units.baseline
+systemctl --failed --no-legend --plain
+[ "$n" -le "$(cat /var/tmp/patchlab_internal/failed-units.baseline)" ]
+'''
+
+[[checks]]
+name = "filesystems-mounted"
+category = "os"
+run = "findmnt --verify --verbose 2>&1 | tail -n 5; findmnt --verify >/dev/null 2>&1"
+
+[[checks]]
+name = "sshd-running"
+category = "smoke"
+run = "systemctl is-active --quiet sshd || systemctl is-active --quiet ssh"
+
+[[checks]]
+name = "package-manager-works"
+category = "os"
+critical = false
+run = '''
+if command -v apt-get >/dev/null; then apt-get check -q
+elif command -v dnf >/dev/null; then dnf -q check
+else rpm -Va --nofiles --nodigest >/dev/null; fi
+'''
+
+# ---- Add application checks, e.g. ----------------------------------------
+# [[checks]]
+# name = "orders-api"
+# category = "application"
+# run = "curl -fsS --max-time 20 http://localhost:8080/health | grep -q '\"status\":\"UP\"'"

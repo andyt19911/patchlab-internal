@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patchlab_internal"
+version = "0.1.0"
+description = "Rapid patch testing: sandbox or clone a system, apply a patch, verify, report, destroy."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary"}
+dependencies = []          # standard library only
+
+[project.scripts]
+patchlab-internal = "patchlab_internal.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["patchlab_internal", "patchlab_internal.*"]
+
+[tool.setuptools.package-data]
+patchlab_internal = ["ps/*.ps1", "ps/guest/*.ps1"]
