@@ -85,7 +85,7 @@ def scan(estate: Estate, pkg: Package, commit: str | None = None) -> dict:
             plans = []
             blocked = [npm.NotFixable(v.name, (f"fixed in {v.fix_version}; " if v.fix_version else
                                                "no fixed version published; ")
-                                      + f"automatic fixes are npm-only, so this needs a person",
+                                      + "automatic fixes are npm-only, so this needs a person",
                                       v.severity, v.advisories) for v in result.vulnerable]
             out["production_known"] = False
         out.update(scan=result.to_dict(), plans=[p.to_dict() for p in plans],
