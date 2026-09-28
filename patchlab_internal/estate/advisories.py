@@ -1,9 +1,8 @@
-"""Advisory scanners for the ecosystems PatchLab Internal reports on but does not yet fix: Python, Go and Cargo.
+"""Advisory scanners for Python, Go and Cargo packages (fixes are built in fixers.py).
 
 Each one runs the ecosystem's own audit tool inside a tool container
 (bridge.ToolBox), never on the host, and returns the same ``npm.Scan`` shape
-so the digest and state files treat every ecosystem alike. They only report:
-proposals stay npm-only until each ecosystem has its own planner.
+so the digest, planner and state files treat every ecosystem alike.
 
 The tools are pinned so a scan is repeatable. Bump them deliberately.
 """
@@ -48,6 +47,28 @@ def _version_key(v: str) -> tuple:
     return tuple(int(p) if p.isdigit() else -1 for p in re.split(r"[.+-]", v.lstrip("v")))
 
 
+def lowest_fix(current: str, fixes_per_advisory: list[list[str]]) -> str | None:
+    """The lowest version that fixes every advisory: for each one, its first
+    fixed version above ``current``; then the highest of those. None when any
+    advisory has no fixed version above the current one."""
+    cur = _version_key(current) if current else ()
+    picks = []
+    for fixes in fixes_per_advisory:
+        above = sorted((f for f in fixes if _version_key(f) > cur), key=_version_key)
+        if not above:
+            return None
+        picks.append(above[0])
+    return max(picks, key=_version_key) if picks else None
+
+
+def is_major(current: str, target: str) -> bool:
+    a, b = _version_key(current), _version_key(target)
+    # 0.x: a minor bump is breaking by semver convention.
+    if a[:1] == (0,) and b[:1] == (0,):
+        return a[:2] != b[:2]
+    return a[:1] != b[:1]
+
+
 # ---------------------------------------------------------------- python
 
 def python(tb, install: list[str]) -> Scan:
@@ -86,18 +107,23 @@ def parse_pip_audit(text: str) -> Scan:
         return Scan([], {}, "pip-audit output has no dependency list")
     out = []
     for d in deps:
-        # pip-audit can list one advisory twice (once per affected range).
-        vulns = list({v["id"]: v for v in d.get("vulns") or []}.values())
+        # pip-audit can list one advisory twice (once per affected range);
+        # merge them, keeping every fixed version.
+        vulns: dict[str, dict] = {}
+        for v in d.get("vulns") or []:
+            seen = vulns.setdefault(v["id"], {**v, "fix_versions": []})
+            seen["fix_versions"] = sorted(set(seen["fix_versions"]) | set(v.get("fix_versions") or []),
+                                          key=_version_key)
         if not vulns:
             continue
-        fixes = sorted({f for v in vulns for f in v.get("fix_versions") or []}, key=_version_key)
+        current = d.get("version", "")
+        target = lowest_fix(current, [v["fix_versions"] for v in vulns.values()])
         out.append(Vulnerable(
             name=d["name"], severity=UNKNOWN, direct=False,
             advisories=[Advisory(id=v["id"], title=(v.get("description") or "")[:200], severity=UNKNOWN,
                                  url=f"https://osv.dev/vulnerability/{v['id']}",
-                                 range=f"{d['name']}=={d.get('version', '?')}") for v in vulns],
-            fix="in-range" if fixes else "none", fix_name=d["name"],
-            fix_version=fixes[-1] if fixes else None))
+                                 range=f"{d['name']}=={current or '?'}") for v in vulns.values()],
+            fix="in-range" if target else "none", fix_name=d["name"], fix_version=target))
     counts = _counts(out)
     counts["audited"] = len(deps)
     return Scan(out, counts)
@@ -130,6 +156,7 @@ def parse_govulncheck(text: str) -> Scan:
         return Scan([], {}, f"govulncheck did not return JSON: {e}")
     osv = {o["osv"]["id"]: o["osv"] for o in objs if "osv" in o}
     modules: dict[str, Vulnerable] = {}
+    fixes: dict[str, list] = {}
     for o in objs:
         f = o.get("finding")
         if not f or not f.get("trace"):
@@ -148,10 +175,12 @@ def parse_govulncheck(text: str) -> Scan:
         v.advisories.append(Advisory(id=f["osv"], title=entry.get("summary", ""), severity=UNKNOWN,
                                      url=f"https://pkg.go.dev/vuln/{f['osv']}",
                                      range=f"{mod}@{frame.get('version', '?')}"))
-        if f.get("fixed_version"):
-            v.fix = "in-range"
-            fixed = set(filter(None, (v.fix_version or "").split(", "))) | {f["fixed_version"]}
-            v.fix_version = ", ".join(sorted(fixed))
+        fixes.setdefault(mod, []).append(f.get("fixed_version"))
+    for mod, fixed in fixes.items():
+        v = modules[mod]
+        # Every advisory needs a fixed version, or no single upgrade fixes the module.
+        if all(fixed):
+            v.fix, v.fix_version = "in-range", max(fixed, key=_version_key)
     out = sorted(modules.values(), key=lambda v: v.name)
     return Scan(out, _counts(out))
 

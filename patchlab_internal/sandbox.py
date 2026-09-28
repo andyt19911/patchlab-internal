@@ -18,6 +18,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 LABEL = "patchlab_internal"
+# The sandbox's host name on its private network, so a sidecar (a browser) can reach the app.
+APP_ALIAS = "app"
 RUN_LABEL = "patchlab_internal.run"
 CACHE_REPO = "patchlab-internal-cache"
 
@@ -82,7 +84,7 @@ class DockerSandbox:
     caps: dict = {}   # containers cannot reboot or checkpoint
 
     def __init__(self, image: str, run_id: str, name: str, *, memory: str, cpus: str,
-                 pids: int, network: str, env: dict[str, str]):
+                 pids: int, network: str, env: dict[str, str | None]):
         self.image = image
         self.run_id = run_id
         self.name = name
@@ -106,8 +108,12 @@ class DockerSandbox:
             "--security-opt", "no-new-privileges",
             "--entrypoint", "",
         ]
+        if self.private_network and self.network == self.private_network:
+            args += ["--network-alias", APP_ALIAS]
         for k, v in self.env.items():
-            args += ["-e", f"{k}={v}"]
+            # None: docker copies the value from this process's environment,
+            # so a credential never appears on a command line.
+            args += ["-e", k if v is None else f"{k}={v}"]
         args += [self.image, "sleep", "infinity"]
         # Allow time for the image pull on first use.
         _docker(*args, timeout=900)
@@ -195,13 +201,13 @@ def create_network(name: str, run_id: str) -> str:
 
 
 def start_sidecar(image: str, run_id: str, name: str, alias: str, network: str,
-                  env: dict[str, str], memory: str = "1g") -> str:
+                  env: dict[str, str], memory: str = "1g", command: list[str] | None = None) -> str:
     args = ["run", "-d", "--name", name, "--label", f"{LABEL}=1", "--label", f"{RUN_LABEL}={run_id}",
             "--network", network, "--network-alias", alias, "--memory", memory,
             "--security-opt", "no-new-privileges"]
     for k, v in env.items():
         args += ["-e", f"{k}={v}"]
-    _docker(*args, image, timeout=900)
+    _docker(*args, image, *(command or []), timeout=900)
     return name
 
 

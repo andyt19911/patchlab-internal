@@ -15,6 +15,11 @@ from .manifest import Estate, Package
 SRC_ROOT = "/src"
 
 
+# PatchLab's own check helpers (browser_smoke.mjs), copied into every sandbox.
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
+TOOLS_DIR = "/opt/patchlab/tools"
+
+
 def repo_root(pkg: Package) -> str:
     return f"{SRC_ROOT}/{pkg.repo.name}"
 
@@ -46,7 +51,8 @@ def config_for(estate: Estate, pkg: Package, checkout: Path, commit: str) -> Con
     elsewhere in the repo (subsovereign's backend reads docs/ and the SDKs)."""
     return Config(
         name=pkg.id, path=estate.path, sandbox=sandbox_for(estate, pkg),
-        deploy=[Deploy(src=checkout, dest=repo_root(pkg))], services=[], checks=list(pkg.checks),
+        deploy=[Deploy(src=checkout, dest=repo_root(pkg)), Deploy(src=ASSETS, dest=TOOLS_DIR)],
+        services=[], checks=list(pkg.checks),
         health=Health(enabled=False),
         metadata={"repository": pkg.repo.url, "branch": pkg.repo.branch, "commit": commit,
                   "package": pkg.id, "image": pkg.image or ""})
@@ -63,13 +69,15 @@ class ToolBox:
     It has the outside network (registries) but no credentials: private git
     dependencies come from the mirrors, exactly as in a test run."""
 
-    def __init__(self, estate: Estate, pkg: Package, run_id: str):
+    def __init__(self, estate: Estate, pkg: Package, run_id: str, image: str | None = None,
+                 extra_env: dict[str, str | None] | None = None, setup: list[str] | None = None):
         self.estate, self.pkg, self.run_id = estate, pkg, run_id
         sb = sandbox_for(estate, pkg)
         self.sb = sb
-        self.box = DockerSandbox(pkg.image, run_id, f"patchlab-internal-{run_id}-tool",
+        self.setup = pkg.setup if setup is None else setup
+        self.box = DockerSandbox(image or pkg.image, run_id, f"patchlab-internal-{run_id}-tool",
                                  memory=sb.memory, cpus=sb.cpus, pids=sb.pids, network="bridge",
-                                 env=sandbox_env(sb))
+                                 env={**sandbox_env(sb), **(extra_env or {})})
 
     def start(self, checkout: Path | None) -> None:
         self.box.start()
@@ -80,7 +88,7 @@ class ToolBox:
             self.box.copy_in(m.path, mirror_dest(i, m))
         if checkout is not None:
             self.box.copy_in(checkout, repo_root(self.pkg))
-        for cmd in self.pkg.setup:
+        for cmd in self.setup:
             res = self.box.exec(cmd, timeout=1800)
             if not res.ok:
                 raise RuntimeError(f"setup failed in tool container: {cmd}: {res.output[-500:]}")
@@ -96,8 +104,8 @@ class ToolBox:
 
 
 @contextmanager
-def toolbox(estate: Estate, pkg: Package, run_id: str, checkout: Path | None):
-    tb = ToolBox(estate, pkg, run_id)
+def toolbox(estate: Estate, pkg: Package, run_id: str, checkout: Path | None, **kw):
+    tb = ToolBox(estate, pkg, run_id, **kw)
     try:
         tb.start(checkout)
         yield tb

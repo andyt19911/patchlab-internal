@@ -10,6 +10,18 @@
 workdir = "~/.local/share/patchlab-internal/estate"
 publish = "report-only"          # M4 turns on "draft-pr"
 
+# The coding agent `estate repair` hands failing tests to (docs/DESIGN.md §4.5).
+# Off until the runner has an agent credential: its name goes in `env`, its
+# value only in the runner's environment. Uncomment on the runner host.
+#
+# [repair]
+# image   = "node:22-bookworm"
+# setup   = ["npm install -g @anthropic-ai/claude-code"]
+# command = """claude -p "$(cat /tmp/patchlab-brief.md)" --permission-mode acceptEdits \
+#   --allowedTools Read Edit Write Glob Grep 'Bash(git diff:*)' 'Bash(git status:*)' 'Bash(ls:*)'"""
+# env     = ["ANTHROPIC_API_KEY"]
+# timeout = 2700
+
 # Private git dependencies. The host fetches them with its own credentials;
 # sandboxes get a read-only copy and never see a token.
 [[mirror]]
@@ -247,17 +259,51 @@ branch = "main"
     run     = "NODE_OPTIONS=--test-reporter=tap npm test"
     results = "tap"
 
+  # The repo has no tests for the console, only a typecheck. PatchLab adds a
+  # production build and a browser smoke check (patchlab_internal/assets/
+  # browser_smoke.mjs): every route loads in headless Chromium, must render,
+  # and must throw nothing uncaught. The browser is a sidecar, so nothing is
+  # installed into the app.
   [[repo.package]]
   path      = "packages/admin-console"
   ecosystem = "npm"
   image     = "node:20-bookworm"
   install   = ["npm ci --no-audit --no-fund"]
-  not_covered = ["Behaviour: the package has no tests, only a typecheck."]
+  not_covered = [
+    "Signed-in behaviour: there is no API in the sandbox, so every route renders signed out (the login screen).",
+    "Interaction beyond loading each route: there are no tests that click through the console.",
+  ]
+
+    [[repo.package.sidecars]]
+    name    = "browser"
+    image   = "mcr.microsoft.com/playwright:v1.55.0-noble"
+    # Headless Chromium binds DevTools to loopback only, whatever the flags say,
+    # so a small forwarder in the same container exposes it to the sandbox.
+    command = ["bash", "-c", """
+      /ms-playwright/chromium_headless_shell-1187/chrome-linux/headless_shell --no-sandbox --disable-gpu \
+        --remote-debugging-port=9223 about:blank &
+      exec node -e "const net = require('net');
+        net.createServer((c) => { const u = net.connect(9223, '127.0.0.1');
+          c.pipe(u).pipe(c); u.on('error', () => c.destroy()); c.on('error', () => u.destroy()); })
+        .listen(9222, '0.0.0.0')"
+    """]
+    health  = "bash -c 'echo > /dev/tcp/127.0.0.1/9223 && echo > /dev/tcp/127.0.0.1/9222'"
+    memory  = "2g"
 
     [[repo.package.checks]]
     name     = "typecheck"
     run      = "npm run typecheck"
     category = "build"
+
+    [[repo.package.checks]]
+    name     = "build"
+    run      = "npm run build"
+    category = "build"
+
+    [[repo.package.checks]]
+    name    = "browser-smoke"
+    run     = "npx vite preview --host 0.0.0.0 --port 4173 --strictPort >/tmp/preview.log 2>&1 & pid=$!; node /opt/patchlab/tools/browser_smoke.mjs --url http://app:4173 --browser browser:9222 / /orgs /fleet /audit-log /ai-router; rc=$?; kill $pid; exit $rc"
+    results = "tap"
 
   # The migrations job in .github/workflows/ci.yml. The sandbox is a Postgres
   # image only for its psql client; the database is the sidecar.

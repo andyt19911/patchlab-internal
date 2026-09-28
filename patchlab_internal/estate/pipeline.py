@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import shlex
 import sys
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from pathlib import Path
 from .. import report as engine_report
 from .. import runner
 from ..config import Patch
-from . import advisories, bridge, gitops, manifest, npm, state, triage
+from . import advisories, bridge, fixers, gitops, manifest, npm, repair, state, triage
 from .manifest import Estate, Package
 
 
@@ -81,12 +82,7 @@ def scan(estate: Estate, pkg: Package, commit: str | None = None) -> dict:
             direct = npm.direct_dependencies(checkout / pkg.path / "package.json")
             plans, blocked = npm.plan(result, set(direct), estate.ignore)
         else:
-            # Reported, never proposed: there is no planner for this ecosystem yet.
-            plans = []
-            blocked = [npm.NotFixable(v.name, (f"fixed in {v.fix_version}; " if v.fix_version else
-                                               "no fixed version published; ")
-                                      + "automatic fixes are npm-only, so this needs a person",
-                                      v.severity, v.advisories) for v in result.vulnerable]
+            plans, blocked = upgrade_plans(result, estate.ignore)
             out["production_known"] = False
         out.update(scan=result.to_dict(), plans=[p.to_dict() for p in plans],
                    not_fixable=[b.to_dict() for b in blocked], error=result.error)
@@ -95,6 +91,25 @@ def scan(estate: Estate, pkg: Package, commit: str | None = None) -> dict:
     log(f"{pkg.id}: {len(out.get('scan', {}).get('vulnerable', []))} vulnerable package(s), "
         f"{len(out.get('plans', []))} proposal(s) possible")
     return _save_scan(estate, pkg, out)
+
+
+def upgrade_plans(result: npm.Scan, ignore: dict[str, str]) -> tuple[list[npm.Plan], list[npm.NotFixable]]:
+    """One "upgrade" plan per vulnerable dependency (Python, Go, Cargo)."""
+    plans, blocked = [], []
+    for v in result.vulnerable:
+        if v.name in ignore:
+            blocked.append(npm.NotFixable(v.name, f"ignored in estate.toml: {ignore[v.name]}",
+                                          v.severity, v.advisories))
+        elif v.fix == "none" or not v.fix_version:
+            blocked.append(npm.NotFixable(v.name, "no fixed version published for every advisory",
+                                          v.severity, v.advisories))
+        elif all(a.severity == "info" for a in v.advisories):
+            blocked.append(npm.NotFixable(v.name, "informational only (unmaintained, unsound or yanked); "
+                                          "nothing to upgrade to", v.severity, v.advisories))
+        else:
+            plans.append(npm.Plan("upgrade", v.name, [v.name], v.advisories, v.severity,
+                                  production=False, suggested_version=v.fix_version))
+    return plans, blocked
 
 
 def _save_scan(estate: Estate, pkg: Package, data: dict) -> dict:
@@ -139,10 +154,14 @@ def propose(estate: Estate, pkg: Package, plan: npm.Plan, sha: str, out: Path) -
                                                + res.output.strip().splitlines()[-1][:300])
                         continue
                     trial = npm.audit(tb)
-                    still = [v for v in trial.vulnerable if v.name == plan.dependency and v.advisories]
+                    # Clean means every package the plan covers, not just the one bumped:
+                    # a new react-router-dom can still pull in a vulnerable react-router.
+                    targeted = {a.id for a in plan.advisories}
+                    still = sorted({a.id for v in trial.vulnerable if v.name in plan.covers
+                                    for a in v.advisories if a.id in targeted})
                     if still:
-                        result["notes"].append(f"{plan.dependency}@{version} still has advisories: "
-                                               + ", ".join(a.id for a in still[0].advisories))
+                        result["notes"].append(f"{plan.dependency}@{version} leaves advisories: "
+                                               + ", ".join(still))
                         continue
                     after, chosen = trial, version
                     break
@@ -269,11 +288,16 @@ def propose_and_test(estate: Estate, pkg: Package, plan_key: str | None = None,
             raise RuntimeError(f"{pkg.id}: nothing to propose for '{plan_key}' at {sha[:10]} "
                                f"(fixable: {', '.join(_plan_from(p).key for p in scanned.get('plans', [])) or 'none'})")
     results = []
-    for plan in plans:
+    queue, seen = list(plans), {p.key for p in plans}
+    while queue:
+        plan = queue.pop(0)
         run_id = bridge.new_id("proposal")
         out = estate.state_dir / pkg.slug / "proposals" / plan.key / run_id
         log(f"{pkg.id}: proposing {plan.title} at {sha[:10]}")
-        prop = propose(estate, pkg, plan, sha, out)
+        if pkg.ecosystem == "npm":
+            prop = propose(estate, pkg, plan, sha, out)
+        else:
+            prop = fixers.propose(estate, pkg, plan, sha, out, _save_proposal)
         if prop["status"] != "proposed":
             log(f"{pkg.id}: {plan.key}: {prop['status']}")
             decision = triage.Decision(triage.BLOCKED if prop["status"] == "no-candidate" else triage.READY,
@@ -282,7 +306,7 @@ def propose_and_test(estate: Estate, pkg: Package, plan_key: str | None = None,
             state.write_json(out / "decision.json", decision.to_dict())
             results.append({"proposal": prop, "decision": decision.to_dict(), "dir": str(out)})
             continue
-        label = (f"{plan.dependency} -> {prop['version']}" if plan.kind == "major"
+        label = (f"{plan.dependency} -> {prop['version']}" if plan.kind in ("major", "upgrade")
                  else f"in-range fixes ({', '.join(plan.covers)})")
         log(f"{pkg.id}: testing {label}")
         first = test_change(estate, pkg, sha, out / "change.patch", label, out / "runs", run_id + "-1")
@@ -297,7 +321,111 @@ def propose_and_test(estate: Estate, pkg: Package, plan_key: str | None = None,
         log(f"{pkg.id}: {plan.key}: {decision.verdict}. {decision.summary}")
         results.append({"proposal": prop, "decision": decision.to_dict(), "dir": str(out),
                         "report": str(first.report_dir) if first.report_dir else None})
+        for extra in follow_up_plans(estate, pkg, sha, prop):
+            if extra.key not in seen:
+                seen.add(extra.key)
+                log(f"{pkg.id}: {extra.title} fixes what {plan.key} left; proposing it too")
+                queue.append(extra)
     return results
+
+
+def follow_up_plans(estate: Estate, pkg: Package, sha: str, prop: dict) -> list[npm.Plan]:
+    """Major upgrades for what a partial in-range fix left behind.
+
+    npm's audit of the committed lockfile can call a fix in-range that only a
+    major upgrade reaches; once the in-range fixes are applied, the re-audit
+    names the major. Those become proposals of their own, tested separately."""
+    deferred = set(prop.get("deferred_advisories", []))
+    if pkg.ecosystem != "npm" or not deferred or not prop.get("audit_after"):
+        return []
+    after = npm.scan_from_dict(prop["audit_after"])
+    after.vulnerable = [v for v in after.vulnerable if {a.id for a in v.advisories} & deferred]
+    pj_rel = f"{pkg.path}/package.json" if pkg.path != "." else "package.json"
+    manifest_json = gitops.git("show", f"{sha}:{pj_rel}", cwd=mirror_path(estate, pkg.repo.name))
+    data = json.loads(manifest_json)
+    direct = {n for sec in ("dependencies", "devDependencies", "optionalDependencies")
+              for n in data.get(sec, {})}
+    plans, _ = npm.plan(after, direct, estate.ignore)
+    return [p for p in plans if p.kind == "major"]
+
+
+# ---------------------------------------------------------------- repair
+
+def repair_and_test(estate: Estate, pkg: Package, only: list[str] | None = None,
+                    commit: str | None = None, confirm_failures: bool = True) -> dict:
+    """Hand the package's failing tests to the [repair] agent, then test and triage its change."""
+    if estate.repair is None:
+        raise RuntimeError("no [repair] agent in estate.toml")
+    if pkg.unsupported:
+        raise RuntimeError(f"{pkg.id} is not verified here ({pkg.unsupported})")
+    sha = resolve(estate, pkg, commit)
+    failing, h = repair.latest_failures(estate, pkg, sha)
+    if h is None or h.get("commit") != sha:
+        log(f"{pkg.id}: no health run at {sha[:10]} yet; running one")
+        h = health(estate, pkg, sha)
+        failing = list(h.get("failing", []))
+    targets = [t for t in failing if not only or any(o in t for o in only)]
+    if not targets:
+        raise RuntimeError(f"{pkg.id}: nothing failing at {sha[:10]}" + (" matches that" if only else ""))
+    run_id = bridge.new_id("repair")
+    key = "failing-tests" if not only else re.sub(r"[^A-Za-z0-9_.-]+", "-", "-".join(only))[:60]
+    out = estate.state_dir / pkg.slug / "repairs" / key / run_id
+    brief = repair.write_brief(pkg, sha, targets, repair.failure_excerpts(h, targets))
+    log(f"{pkg.id}: asking the repair agent to fix {len(targets)} failing test(s)")
+    prop = {"kind": "repair", "package": pkg.id, "commit": sha, "targets": targets,
+            "plan": {"kind": "repair", "title": f"fix {len(targets)} failing test(s)", "key": key}}
+    prop.update(repair.run_agent(estate, pkg, sha, brief, out))
+    if not prop["changed_files"]:
+        prop["status"] = "no-change"
+        decision = triage.Decision(triage.BLOCKED, "The agent made no change.", [], ["repair"],
+                                   notes=prop["notes"])
+        state.write_json(out / "proposal.json", prop)
+        state.write_json(out / "decision.json", decision.to_dict())
+        return {"proposal": prop, "decision": decision.to_dict(), "dir": str(out)}
+    prop["status"] = "proposed"
+    state.write_json(out / "proposal.json", prop)
+    label = f"repair: {len(targets)} failing test(s)"
+    first = test_change(estate, pkg, sha, out / "change.patch", label, out / "runs", run_id + "-1")
+    confirm = None
+    if confirm_failures and first.report and triage.regressions(first.report):
+        confirm = test_change(estate, pkg, sha, out / "change.patch", label, out / "runs", run_id + "-2").report
+    decision = triage.decide(first.report, prop, pkg.unsupported, confirm)
+    state.write_json(out / "decision.json", decision.to_dict())
+    (out / "pr.md").write_text(repair_pr_body(pkg, prop, decision), encoding="utf-8")
+    log(f"{pkg.id}: repair: {decision.verdict}. {decision.summary}")
+    return {"proposal": prop, "decision": decision.to_dict(), "dir": str(out),
+            "report": str(first.report_dir) if first.report_dir else None}
+
+
+def repaired_already(estate: Estate, pkg: Package, h: dict) -> bool:
+    """A repair was already tried for this commit and these failures (whatever it
+    concluded), so the nightly cycle doesn't pay for the same attempt twice."""
+    base = estate.state_dir / pkg.slug / "repairs"
+    if not base.is_dir():
+        return False
+    for prop in base.glob("*/*/proposal.json"):
+        p = state.read_json(prop) or {}
+        if p.get("commit") == h.get("commit") and set(p.get("targets", [])) == set(h.get("failing", [])):
+            return True
+    return False
+
+
+def repair_pr_body(pkg: Package, prop: dict, decision: triage.Decision) -> str:
+    L = [f"# Fix {len(prop['targets'])} failing test(s) in {pkg.id}", "",
+         f"**PatchLab Internal verdict: {decision.verdict}.** {decision.summary}", "",
+         "Written by a coding agent from the brief below, then tested by PatchLab Internal: the "
+         "package's checks ran before and after the change, and again after rolling it back.", "",
+         "## Tests that were failing", ""] + [f"- `{t}`" for t in prop["targets"]]
+    L += ["", "## What changed", ""] + [f"- `{x}`" for x in prop.get("diffstat", [])]
+    L += ["", "## Gate", "", "| Check | Result | Detail |", "|---|---|---|"]
+    for g in decision.gate:
+        L.append(f"| {g.name} | {'✅' if g.ok else ('⚠️' if g.kind == 'review' else '❌')} | {g.detail} |")
+    if decision.notes:
+        L += ["", "## Notes", ""] + [f"- {n}" for n in decision.notes]
+    if pkg.not_covered:
+        L += ["", "## What this does not prove", ""] + [f"- {x}" for x in pkg.not_covered]
+    L.append("")
+    return "\n".join(L)
 
 
 # ---------------------------------------------------------------- health
@@ -371,7 +499,7 @@ def summarise_health(pkg: Package, sha: str, report: dict | None, prev: dict | N
 
 def pr_body(pkg: Package, prop: dict, decision: triage.Decision, outcome: TestOutcome) -> str:
     plan = prop["plan"]
-    title = (f"Upgrade {plan['dependency']} to {prop.get('version')}" if plan["kind"] == "major"
+    title = (f"Upgrade {plan['dependency']} to {prop.get('version')}" if plan["kind"] in ("major", "upgrade")
              else f"Apply in-range security fixes ({', '.join(plan['covers'])})")
     L = [f"# {title} in {pkg.id}", "",
          f"**PatchLab Internal verdict: {decision.verdict}.** {decision.summary}", ""]

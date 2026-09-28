@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 
 from patchlab_internal.config import ConfigError
-from patchlab_internal.estate import advisories, digest, gitops, manifest, npm, pipeline, state, triage
+from patchlab_internal.estate import (advisories, digest, fixers, gitops, manifest, npm, pipeline, repair,
+                                      state, triage)
 from patchlab_internal.linux import sandbox_env
 from patchlab_internal.estate import bridge
 
@@ -326,7 +327,7 @@ class AdvisoryParserTests(unittest.TestCase):
         self.assertIsNone(scan.error)
         self.assertEqual([v.name for v in scan.vulnerable], ["jinja2"])
         v = scan.vulnerable[0]
-        self.assertEqual((v.fix_version, v.severity), ("3.1.10", "unknown"),
+        self.assertEqual((v.fix_version, v.severity), ("3.1.4", "unknown"),
                          "no severity is invented when the tool gives none")
         self.assertEqual(scan.advisory_ids(), {"GHSA-h5c8-rqwp-cp95", "PYSEC-2024-1"})
         self.assertEqual(scan.counts["audited"], 2, "a clean result says how much was audited")
@@ -366,6 +367,72 @@ class AdvisoryParserTests(unittest.TestCase):
         self.assertEqual((by["foo"].severity, by["foo"].fix_version), ("unknown", ">=1.2.3"))
         self.assertEqual(by["bar"].severity, "info")
         self.assertIn("unmaintained", by["bar"].advisories[0].title)
+
+
+class FixerTests(unittest.TestCase):
+    def test_lowest_fix_clears_every_advisory(self):
+        self.assertEqual(advisories.lowest_fix("1.0", [["1.2", "2.0"], ["1.1", "1.10"]]), "1.2")
+        self.assertIsNone(advisories.lowest_fix("1.0", [["1.2"], []]), "an advisory with no fix blocks")
+        self.assertTrue(advisories.is_major("49.0.0", "50.0.0"))
+        self.assertFalse(advisories.is_major("1.2.0", "1.9.0"))
+        self.assertTrue(advisories.is_major("0.3.1", "0.4.0"), "0.x minors are breaking")
+
+    def test_repin_changes_only_exact_pins_of_that_project(self):
+        text = "# pinned\nCryptography==49.0.0  # why\ncryptography-extra==1.0\nfoo[bar]==1 ; python_version<'4'\n"
+        new, n = fixers.repin(text, "cryptography", "50.0.0")
+        self.assertEqual(n, 1)
+        self.assertEqual(new, text.replace("Cryptography==49.0.0", "Cryptography==50.0.0"))
+        new, n = fixers.repin(text, "Foo", "2")
+        self.assertIn("foo[bar]==2 ; python_version<'4'", new)
+
+    def test_tree_diff_flags_new_and_unusual_sources(self):
+        d = fixers.tree_diff({"a": "1", "b": "1"}, {"a": "2", "c": "1", "d": "@ git+https://x/y"})
+        self.assertEqual(d["upgraded"], [{"name": "a", "from": "1", "to": "2"}])
+        self.assertEqual(d["new_packages"], ["c", "d"])
+        self.assertEqual(d["removed"], [{"name": "b", "version": "1"}])
+        self.assertEqual(d["unusual_sources"], ["d git+https://x/y"])
+
+    def test_non_npm_scans_become_upgrade_plans(self):
+        scan = advisories.parse_pip_audit(json.dumps({"dependencies": [
+            {"name": "cryptography", "version": "49.0.0", "vulns": [{"id": "PYSEC-1", "fix_versions": ["50.0.0"]}]},
+            {"name": "nofix", "version": "1", "vulns": [{"id": "PYSEC-2", "fix_versions": []}]}]}))
+        plans, blocked = pipeline.upgrade_plans(scan, {})
+        self.assertEqual([(p.kind, p.key, p.suggested_version) for p in plans],
+                         [("upgrade", "cryptography", "50.0.0")])
+        self.assertEqual([b.name for b in blocked], ["nofix"])
+
+
+class RepairTests(unittest.TestCase):
+    def test_test_paths(self):
+        for p in ("backend/src/__tests__/a.test.ts", "tests/test_x.py", "pkg/x_test.go", "vitest.config.ts",
+                  "apps/proxy/tests/conftest.py", "web/login.spec.tsx"):
+            self.assertTrue(repair.TEST_PATH.search(p), p)
+        for p in ("backend/src/services/allowed-origins.ts", "src/testing_utils.py", "README.md"):
+            self.assertFalse(repair.TEST_PATH.search(p), p)
+
+    def _report(self, fixes, regress=()):
+        c = {"name": "unit", "transition": "ok", "case_fixes": list(fixes), "case_regressions": list(regress),
+             "before": {"passed": False}, "after": {"passed": True}}
+        return report([c])
+
+    def test_gate_needs_every_target_fixed(self):
+        prop = {"kind": "repair", "targets": ["unit: a", "unit: b"], "test_files_changed": [],
+                "dependency_files_changed": []}
+        rep = self._report(["a", "b"])
+        self.assertEqual(triage.decide(rep, prop).verdict, triage.READY)
+        rep2 = self._report(["a"])
+        self.assertEqual(triage.decide(rep2, prop).verdict, triage.BLOCKED)
+        touched = dict(prop, test_files_changed=["src/__tests__/a.test.ts"])
+        self.assertEqual(triage.decide(rep, touched).verdict, triage.REVIEW)
+
+    def test_repair_agent_config_names_credentials_only(self):
+        base = MINIMAL + '\n[repair]\nimage = "node:22"\ncommand = "claude -p x"\nenv = ["ANTHROPIC_API_KEY"]\n'
+        est = manifest.load(write_manifest(base))
+        self.assertEqual(est.repair.env, ["ANTHROPIC_API_KEY"])
+        with self.assertRaises(ConfigError):
+            manifest.load(write_manifest(base.replace('["ANTHROPIC_API_KEY"]', '["ANTHROPIC_API_KEY=sk-x"]')))
+        with self.assertRaises(ConfigError):
+            manifest.load(write_manifest(base.replace("claude -p x", "ANTHROPIC_API_KEY=sk-ant-" + "a" * 30 + " claude")))
 
 
 class SyncTests(unittest.TestCase):

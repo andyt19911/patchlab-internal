@@ -69,6 +69,12 @@ class Scan:
                 "error": self.error}
 
 
+def scan_from_dict(d: dict) -> Scan:
+    vul = [Vulnerable(**{**v, "advisories": [Advisory(**a) for a in v["advisories"]]})
+           for v in d.get("vulnerable", [])]
+    return Scan(vul, d.get("counts", {}), d.get("error"))
+
+
 def parse_audit(text: str, production: set[str] | None = None) -> Scan:
     """Parse ``npm audit --json`` (npm 7+). ``production`` names the packages that
     also appear in an ``--omit=dev`` audit."""
@@ -123,7 +129,7 @@ class Plan:
     """One change to propose: either a major bump of one direct dependency, or
     every in-range fix at once (npm audit fix without --force)."""
 
-    kind: str                  # major | in-range
+    kind: str                  # major | in-range | upgrade (one dependency, non-npm ecosystems)
     dependency: str | None     # the direct dependency bumped (major only)
     covers: list[str]          # vulnerable package names this should fix
     advisories: list[Advisory]
@@ -133,12 +139,14 @@ class Plan:
 
     @property
     def key(self) -> str:
-        return self.dependency if self.kind == "major" else "in-range-fixes"
+        return self.dependency if self.kind in ("major", "upgrade") else "in-range-fixes"
 
     @property
     def title(self) -> str:
         if self.kind == "major":
             return f"{self.dependency} (major upgrade)"
+        if self.kind == "upgrade":
+            return f"{self.dependency} upgrade"
         return f"in-range fixes for {', '.join(self.covers)}"
 
     def to_dict(self) -> dict:

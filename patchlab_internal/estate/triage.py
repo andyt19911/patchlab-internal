@@ -105,6 +105,12 @@ def gate_for(report: dict | None, proposal: dict, unsupported: str | None = None
                       "reverting the change restores every baseline check" if rolled and not rb_fail
                       else "rollback not verified", rb_fail))
 
+    if proposal.get("kind") == "repair":
+        g += _repair_items(report, proposal)
+        if unsupported:
+            g.append(GateItem("platform coverage", False, f"not verified: {unsupported}", kind="review"))
+        return g
+
     # 5-6. The advisories are gone and none were introduced.
     remaining = proposal.get("remaining_advisories", [])
     introduced = proposal.get("introduced_advisories", [])
@@ -148,13 +154,33 @@ def gate_for(report: dict | None, proposal: dict, unsupported: str | None = None
     return g
 
 
+def _repair_items(report: dict, proposal: dict) -> list[GateItem]:
+    from .repair import fixed_targets
+    g = []
+    targets = proposal.get("targets", [])
+    fixed, not_fixed = fixed_targets(report, targets)
+    g.append(GateItem("targets fixed", bool(targets) and not not_fixed,
+                      f"{len(fixed)} of {len(targets)} failing test(s) now pass" if targets
+                      else "no failing test was targeted", not_fixed))
+    tests = proposal.get("test_files_changed", [])
+    g.append(GateItem("tests untouched", not tests, "no test or test configuration changed" if not tests
+                      else "the change edits tests or their configuration; a person must confirm it "
+                           "fixes the cause rather than the test", tests, kind="review"))
+    deps = proposal.get("dependency_files_changed", [])
+    if deps:
+        g.append(GateItem("dependencies untouched", False, "the change edits dependency manifests",
+                          deps, kind="review"))
+    return g
+
+
 def decide(report: dict | None, proposal: dict, unsupported: str | None = None,
            confirm: dict | None = None) -> Decision:
     """``confirm`` is a second run of the same change, made when the first one
     showed regressions: failures present in both are real, the rest flaky."""
     gate = gate_for(report, proposal, unsupported)
-    labels = ["security"]
-    if proposal.get("plan", {}).get("kind") == "major":
+    labels = ["repair", "agent-written"] if proposal.get("kind") == "repair" else ["security"]
+    plan = proposal.get("plan", {})
+    if plan.get("kind") == "major" or proposal.get("major"):
         labels.append("breaking-risk")
     notes = list(proposal.get("notes", []))
     t = _target(report) if report else None
@@ -188,8 +214,10 @@ def decide(report: dict | None, proposal: dict, unsupported: str | None = None,
     else:
         verdict = READY
     summary = {
-        READY: "Tested and safe to review: nothing regressed, rollback verified, advisories fixed.",
-        REVIEW: "Tests and audits pass, but a person needs to look first: "
+        READY: ("Tested and safe to review: the failing tests now pass, nothing regressed, rollback verified."
+                if proposal.get("kind") == "repair" else
+                "Tested and safe to review: nothing regressed, rollback verified, advisories fixed."),
+        REVIEW: "The checks pass, but a person needs to look first: "
                 + "; ".join(g.name for g in failed) + ".",
         BLOCKED: "Not proposed: " + "; ".join(f"{g.name} ({g.detail})" for g in failed if g.kind == "blocker") + ".",
         INCONCLUSIVE: "Could not be decided: " + "; ".join(f"{g.name} ({g.detail})" for g in failed

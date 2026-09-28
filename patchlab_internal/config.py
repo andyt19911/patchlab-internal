@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -115,6 +116,9 @@ class Sidecar:
     env: dict[str, str] = field(default_factory=dict)
     # Run inside the sidecar until it exits 0; the run waits for it before deploying.
     health: str | None = None
+    # Replaces the image's default command (e.g. a headless browser's flags).
+    command: list[str] = field(default_factory=list)
+    memory: str = "1g"
     health_timeout: int = 120
 
 
@@ -305,7 +309,12 @@ def parse_sidecars(items: list, where: str = "[[sidecars]]") -> list[Sidecar]:
             raise ConfigError(f"{w}: name must be a short lower-case host name, got {name!r}")
         out.append(Sidecar(name=name, image=str(_require(sc, "image", w)),
                            env={str(k): str(v) for k, v in sc.get("env", {}).items()},
-                           health=sc.get("health"), health_timeout=int(sc.get("health_timeout", 120))))
+                           health=sc.get("health"), health_timeout=int(sc.get("health_timeout", 120)),
+                           command=(shlex.split(sc["command"]) if isinstance(sc.get("command"), str)
+                                    else _str_list(sc.get("command", []), f"{w} command")),
+                           memory=str(sc.get("memory", "1g"))))
+        if name == "app":
+            raise ConfigError(f"{w}: 'app' is the sandbox's own host name; pick another")
     names = [s.name for s in out]
     if len(names) != len(set(names)):
         raise ConfigError(f"{where}: sidecar names must be unique")

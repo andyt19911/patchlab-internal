@@ -150,7 +150,7 @@ class LinuxPlatform:
                 tr.box.private_network = sandbox.create_network(name + "-net", tr.run_id)
             tr.box.start()
             if private and tr.box.network != tr.box.private_network:
-                tr.box.connect(tr.box.private_network)
+                tr.box.connect(tr.box.private_network, alias=sandbox.APP_ALIAS)
             if sb.ca_bundle:
                 tr.box.exec(f"mkdir -p {shlex.quote(CA_PATH.rsplit('/', 1)[0])}", timeout=30)
                 tr.box.copy_in(sb.ca_bundle, CA_PATH)
@@ -179,7 +179,8 @@ class LinuxPlatform:
             for sc in self.cfg.sandbox.sidecars:
                 cname = f"{box.name}-{sc.name}"
                 box.sidecars.append(cname)
-                sandbox.start_sidecar(sc.image, tr.run_id, cname, sc.name, box.private_network, sc.env)
+                sandbox.start_sidecar(sc.image, tr.run_id, cname, sc.name, box.private_network, sc.env,
+                                      memory=sc.memory, command=sc.command)
             for sc in self.cfg.sandbox.sidecars:
                 cname = f"{box.name}-{sc.name}"
                 if sc.health and not sandbox.wait_healthy(cname, sc.health, sc.health_timeout):

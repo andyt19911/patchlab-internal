@@ -1,6 +1,6 @@
 # PatchLab Internal: estate control plane
 
-Status: M1 and M2 built and run end to end on 2026-09-28; M3 onwards proposed.
+Status: M1, M2 and M6 built and run end to end on 2026-09-28; M3–M5 proposed.
 Builds on [ESTATE_SURVEY.md](ESTATE_SURVEY.md). Revised after the
 [docs review](#appendix-review-items) of the first version.
 
@@ -252,6 +252,30 @@ credentials (private dependencies come from the mirrors):
    from anywhere but the npm registry or a declared mirror; missing integrity
    hashes.
 
+**Python, Go and Cargo** (`estate/fixers.py`) get one "upgrade" proposal per
+vulnerable dependency, to the lowest version that fixes every advisory:
+
+- **Python**: the exact pin in the package's requirement files moves to that
+  version (a transitive dependency pinned nowhere gets a `name>=x` floor in
+  `requirements.txt`). Unlike npm, proving the change means installing it, and
+  pip may run a source package's build code: that happens in the tool
+  container, which has no credentials.
+- **Go**: `go get module@version && go mod tidy`.
+- **Cargo**: `cargo update --package crate` (Cargo.lock only). When the newest
+  compatible version is still vulnerable, the proposal says the fix needs a new
+  major in `Cargo.toml`.
+
+The re-audit decides whether the advisories are gone, and the change to the
+installed set (upgraded, added, removed, non-registry sources) goes through the
+same supply-chain items as npm's lockfile diff. A jump across a major version
+is labelled `breaking-risk`.
+
+**What a partial fix leaves.** When `npm audit fix` fixes what it can in range
+and exits non-zero, the re-audit names the major upgrade the rest needs (caer's
+react-router 6 → 7). That becomes a proposal of its own, tested separately. A
+candidate counts as clean only when every package the plan covers is clean,
+not just the one bumped.
+
 #### 4.1.3 Test
 
 One engine run on a fresh checkout: install → baseline checks → apply the diff
@@ -326,14 +350,37 @@ advisories, proposals), then the details. M5 renders the same data as an
 Estate page in the existing web front end, with the same localhost-and-token
 security model.
 
-### 4.5 Assisted fixes (M6)
+### 4.5 Repair: failing tests (M6, built)
 
-When a major upgrade is BLOCKED because the code needs to change (a renamed
-API, a stricter type), triage already knows which tests broke and how. M6 turns
-that into a fix brief (failing tests, errors, the upgrade's changelog) for a
-coding agent, whose patch then goes through **the same gate** as any other
-change, with the dependency bump. The agent never gets credentials and never
-publishes; the gate and a person decide.
+`estate repair <package>` (and `cycle`, when `[repair]` is configured) hands
+the tests that fail in the latest health run to a coding agent:
+
+1. A **brief** is written from the health run: each failing test, the lines of
+   its log around the failure, the command that runs it, the environment and
+   services the checks use, and the rules (fix the cause; never skip, weaken or
+   delete a test; change as little as possible; follow the repo's CLAUDE.md).
+2. The **agent** runs in its own tool container with a copy of the checkout.
+   The credentials it needs are *named* in `[repair] env` and passed from the
+   runner's environment with `docker run -e NAME` (the value is never on a
+   command line or in `estate.toml`). They never reach a test sandbox.
+3. Its edits (committed or not) are captured as a diff and **tested like any
+   change**: baseline, apply, verify, roll back, verify, with the package's
+   services, and a second run to separate flaky failures.
+4. The **gate**: every targeted test must go from failing to passing; nothing
+   else may regress or disappear; the rollback must bring the failure back. An
+   edit to a test file or test configuration, or to a dependency manifest,
+   makes it REVIEW: those are the changes that could make a test pass without
+   fixing anything.
+
+The cycle tries each (commit, set of failures) once, so a failure it couldn't
+fix doesn't cost an agent run every night.
+
+**Browser smoke check.** A package whose only check is a typecheck gets a
+runtime check from PatchLab itself: `assets/browser_smoke.mjs` loads each route
+in a headless Chromium sidecar and reports, per route, "renders" and "has no
+uncaught errors" as TAP. It has no dependencies (DevTools protocol over a
+minimal WebSocket client), so nothing is installed into the app under test.
+caer's admin console uses it.
 
 ## 5. Security
 
@@ -466,8 +513,8 @@ changed, the proposal keeps what npm fixed, records the rest as deferred, and
 the gate's "partial fix" item makes the verdict REVIEW, never READY. If nothing
 targeted was fixed it is BLOCKED.
 
-Still open for M2's "done when": the Python, Go and Cargo findings are
-reported, not proposed; sentinel's cryptography upgrade is the only one today.
+Closed after M2 (see M6): Python, Go and Cargo findings are now proposed and
+tested, not just reported.
 
 ### M3: build health on a schedule
 
@@ -488,10 +535,26 @@ merge with no local steps.
 
 `rules.toml` with the rules in §4.3, the Estate page, the digest on the page.
 
-### M6: assisted fixes
+### M6: PatchLab fixes everything it finds — built 2026-09-28
 
-Fix briefs for BLOCKED major upgrades, handed to a coding agent, gated the same
-way (§4.5).
+Andy's rule: nothing is fixed by hand; every gap is a PatchLab capability.
+Built: Python/Go/Cargo proposals (§4.1.2), follow-up majors for partial npm
+fixes, the browser smoke check, and repair of failing tests by a coding agent
+(§4.5). Evidence, at the same commits as M2:
+
+| Case | What PatchLab did | Verdict |
+|---|---|---|
+| sentinel `cryptography` 49.0.0 (PYSEC-2026-3552) | pinned 50.0.0 in requirements.txt; 37 tests before, after, rollback | READY (`breaking-risk`) |
+| caer admin-console, 8 in-range advisories | lockfile fix; typecheck, build and 10 browser-smoke tests | REVIEW (2 left for a major) |
+| caer admin-console, react-router 6 → 7 | found from the partial fix; 7.18.4; smoke 10/10 after | REVIEW (adds `cookie`, `set-cookie-parser`) |
+| subsovereign CORS preflight test | repair brief, scripted stand-in agent, full suite | REVIEW (the fix edits a test file) |
+
+The repair run used a **scripted stand-in** for the agent, because the runner
+has no agent credential yet: it proves the brief, the capture, the full-suite
+test and the gate, not an agent's judgement. The gate would BLOCK a change
+that leaves a targeted test failing (unit-tested). With `[repair]` configured,
+the GDPR retention test (a real product bug: an erasure deletes a refund's
+reversal) goes through the same path.
 
 ## 8. Decisions needed
 
@@ -505,6 +568,8 @@ way (§4.5).
 5. **nodemailer 9.1.1 or 10.0.12:** 9.1.1 is the smaller jump and is clean
    today; 10.x ships its own types (so `@types/nodemailer` could go) and is
    where fixes will land first. PatchLab Internal proposes 9.1.1 by policy.
+6. **Repair agent credential:** `[repair]` needs an agent API key on the runner
+   (named in `env`, never in the file). Until then repair is off.
 
 ## Appendix: review items
 

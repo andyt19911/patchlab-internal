@@ -19,13 +19,15 @@ def collect(estate: Estate) -> list[dict]:
         _, h = state.latest(pdir / "health", "summary.json")
         scan = state.read_json(pdir / "scan.json") or {}
         decisions = []
-        props = pdir / "proposals"
-        if props.is_dir():
+        for kind, prefix in (("proposals", ""), ("repairs", "repair of ")):
+            props = pdir / kind
+            if not props.is_dir():
+                continue
             for key in sorted(p.name for p in props.iterdir() if p.is_dir()):
                 run, d = state.latest(props / key, "decision.json")
                 if d:
                     prop = state.read_json(run / "proposal.json") or {}
-                    decisions.append({"key": key, "run": str(run), "decision": d, "proposal": prop})
+                    decisions.append({"key": prefix + key, "run": str(run), "decision": d, "proposal": prop})
         rows.append({"package": pkg, "health": h, "scan": scan, "decisions": decisions})
     return rows
 

@@ -65,7 +65,7 @@ def cmd_scan(args) -> int:
             of = f" of {audited} audited" if audited is not None else ""
             print(f"{pkg.id} @ {res['commit'][:10]}: " + (res.get("error") or f"{len(vul)} vulnerable{of}"))
             for p in res.get("plans", []):
-                print(f"  propose  {p['key']:<22} {p['severity']:<9} {'prod' if p['production'] else 'dev '}  "
+                print(f"  propose  {p['key']:<22} {p['severity']:<9} {('?   ' if res.get('production_known') is False else 'prod' if p['production'] else 'dev ')}  "
                       f"{len(p['advisories'])} advisories")
             for b in res.get("not_fixable", []):
                 print(f"  manual   {b['name']:<22} {b['severity']:<9} {b['reason']}")
@@ -89,6 +89,20 @@ def cmd_propose(args) -> int:
     return worst
 
 
+def cmd_repair(args) -> int:
+    est = _estate(args)
+    _need_docker()
+    pkg = est.find(args.package)
+    with state.exclusive(est.state_dir):
+        r = pipeline.repair_and_test(est, pkg, args.test or None, args.commit,
+                                     confirm_failures=not args.no_confirm)
+    d = r["decision"]
+    print(f"\n{d['verdict']}: {r['proposal']['plan']['title']}\n  {d['summary']}\n  {r['dir']}")
+    for g in d.get("gate", []):
+        print(f"    {'ok ' if g['ok'] else 'NO '} {g['name']}: {g['detail']}")
+    return {"READY": 0, "REVIEW": 0, "BLOCKED": 1, "INCONCLUSIVE": 2}[d["verdict"]]
+
+
 def cmd_health(args) -> int:
     est = _estate(args)
     _need_docker()
@@ -110,7 +124,8 @@ def cmd_digest(args) -> int:
 
 
 def cmd_cycle(args) -> int:
-    """The scheduled job: sync, health, scan, propose and test every fixable advisory, digest."""
+    """The scheduled job: sync, health (and repair, with a [repair] agent), scan, propose and
+    test every fixable advisory, digest."""
     est = _estate(args)
     _need_docker()
     failures = 0
@@ -127,7 +142,10 @@ def cmd_cycle(args) -> int:
             for step in (["health"] if args.no_propose else ["health", "propose"]):
                 try:
                     if step == "health":
-                        pipeline.health(est, pkg)
+                        h = pipeline.health(est, pkg)
+                        if est.repair and h.get("failing") and not args.no_propose \
+                                and not pipeline.repaired_already(est, pkg, h):
+                            pipeline.repair_and_test(est, pkg)
                     elif pkg.ecosystem in manifest.SCANNERS and not pkg.unsupported:
                         pipeline.scan(est, pkg)
                         if pkg.ecosystem in manifest.PROPOSERS:
@@ -165,6 +183,13 @@ def register(sub) -> None:
     p.add_argument("--no-confirm", action="store_true",
                    help="don't re-run a failing test to separate real failures from flaky ones")
     p.set_defaults(func=cmd_propose)
+
+    rp = es.add_parser("repair", help="hand failing tests to the [repair] agent, then test and triage its fix")
+    rp.add_argument("package")
+    rp.add_argument("--test", action="append", help="only failing tests whose name contains this (repeatable)")
+    rp.add_argument("--commit")
+    rp.add_argument("--no-confirm", action="store_true")
+    rp.set_defaults(func=cmd_repair)
 
     h = es.add_parser("health", help="run each package's checks on the current code (no change)")
     h.add_argument("package", nargs="*")

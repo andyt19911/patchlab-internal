@@ -12,10 +12,10 @@ from ..config import Check, ConfigError, Sidecar, parse_sidecars
 
 # "sql" is a schema with no package manager: health checks only, nothing to scan.
 ECOSYSTEMS = ("npm", "python", "cargo", "go", "gradle", "swift", "sql")
-# Ecosystems the estate layer can scan and propose updates for today. The
-# others can still have health checks; their advisories are reported as not scanned.
-PROPOSERS = ("npm",)
-# Ecosystems whose advisories are scanned and reported (proposals need a PROPOSER).
+# Ecosystems the estate layer can propose and test fixes for. The others can
+# still have health checks; their advisories are reported as not scanned.
+PROPOSERS = ("npm", "python", "go", "cargo")
+# Ecosystems whose advisories are scanned.
 SCANNERS = ("npm", "python", "go", "cargo")
 PUBLISH_MODES = ("report-only", "draft-pr")
 
@@ -101,6 +101,22 @@ class Repo:
 
 
 @dataclass
+class RepairAgent:
+    """The coding agent `estate repair` hands a failing test to.
+
+    It runs in its own tool container with a copy of the checkout. Its
+    credentials are named here and read from the runner's environment at run
+    time; they never reach a test sandbox, and their values never appear in
+    this file or on a command line."""
+
+    image: str
+    command: str
+    setup: list[str] = field(default_factory=list)
+    env: list[str] = field(default_factory=list)
+    timeout: int = 2700
+
+
+@dataclass
 class Estate:
     path: Path
     workdir: Path
@@ -110,6 +126,7 @@ class Estate:
     repos: list[Repo] = field(default_factory=list)
     # Dependency updates the tool will never propose (name -> reason).
     ignore: dict[str, str] = field(default_factory=dict)
+    repair: RepairAgent | None = None
 
     def packages(self) -> list[Package]:
         return [p for r in self.repos for p in r.packages]
@@ -205,6 +222,16 @@ def load(path: str | Path) -> Estate:
         if not estate.ca_bundle.is_file():
             raise ConfigError(f"CA bundle not found: {estate.ca_bundle}")
     estate.ignore = {str(k): str(v) for k, v in data.get("ignore", {}).items()}
+    if "repair" in data:
+        r = data["repair"]
+        estate.repair = RepairAgent(image=str(_req(r, "image", "[repair]")),
+                                    command=str(_req(r, "command", "[repair]")),
+                                    setup=_strs(r.get("setup", []), "[repair] setup"),
+                                    env=_strs(r.get("env", []), "[repair] env"),
+                                    timeout=int(r.get("timeout", 2700)))
+        for name in estate.repair.env:
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name):
+                raise ConfigError(f"[repair] env lists variable names only, got {name!r}")
 
     for i, m in enumerate(data.get("mirror", [])):
         w = f"[[mirror]] #{i + 1}"
@@ -262,6 +289,11 @@ def load(path: str | Path) -> Estate:
     ids = [p.id for p in estate.packages()]
     if len(ids) != len(set(ids)):
         raise ConfigError("package paths must be unique within a repo")
+    if estate.repair:
+        for where, v in [("[repair] command", estate.repair.command)] + [
+                ("[repair] setup", c) for c in estate.repair.setup]:
+            if find_secrets(v):
+                raise ConfigError(f"{where} looks like it holds a credential; name it in [repair] env instead")
     problems = secret_problems(estate)
     if problems:
         raise ConfigError("estate.toml must hold only throwaway test values, but these look like "
