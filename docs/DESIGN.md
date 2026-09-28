@@ -599,7 +599,7 @@ only from the default branch, so it starts once this branch is merged.
 ### M4: draft PRs — built 2026-09-28, off
 
 §4.1.5. A dry run at the M2/M6 commits lists 13 draft PRs across four repos
-(6 READY, 7 REVIEW). Turning it on is Andy's call: `publish = "draft-pr"` in
+(7 READY, 6 REVIEW). Turning it on is Andy's call: `publish = "draft-pr"` in
 estate.toml plus write access on the tokens.
 
 ### M5: drift rules and the Estate page
