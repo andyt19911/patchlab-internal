@@ -1,14 +1,15 @@
 # MIIMAGINELabs estate survey
 
-A read-only survey of the MIIMAGINELabs repositories, taken on 2026-09-28 from
+A read-only survey of the MIIMAGINELabs and StreamlyApps repositories, taken on 2026-09-28 from
 shallow clones of each default branch. It is the baseline PatchLab Internal is
 being built to maintain: what each tool is, how it builds and tests, and where
 it stands on dependencies, security fixes, build health and consistency.
 
 Nothing was changed in any surveyed repository.
 
-**Scope:** 26 repositories. `MIIMAGINELabs/PatchLab` (the public release repo)
-is left out. `claude-config` is a personal `~/.claude` backup rather than a
+**Scope:** 26 MIIMAGINELabs repositories plus `StreamlyApps/subsovereign`, the
+only StreamlyApps repository visible to this survey (§6).
+`MIIMAGINELabs/PatchLab` (the public release repo) is left out. `claude-config` is a personal `~/.claude` backup rather than a
 tool, so it is listed but not scored.
 
 ---
@@ -17,13 +18,13 @@ tool, so it is listed but not scored.
 
 | # | Finding | Repos | Why it matters |
 |---|---|---|---|
-| 1 | **Known-vulnerable dependencies in 8 repos.** 6 npm lockfiles, 3 pinned Python files and 1 Cargo lockfile have advisories, almost all with fixes available (details in §4). | 8 | They are the first candidates for automated, tested updates. |
-| 2 | **22 of 26 repos have no CI at all.** Only latticeiq, caer and streamly-security-core run tests on push; sentinel runs `pip-audit` only when its requirements file changes. | 22 | Nothing tells anyone when these repos stop building. |
-| 3 | **No repo has Dependabot or Renovate.** latticeiq has GitHub dependency review on PRs; nothing proposes updates anywhere. | 26 | Advisories are only found when someone looks. |
-| 4 | **Node 20 is end-of-life** (April 2026) but is still the Docker runtime in 5 repos and in caer's CI, and `engines` fields in 3 repos still allow it. `alpine:3.20` (caer) is also past end of life. | 7 | Runtime security fixes stopped five months ago. |
+| 1 | **Known-vulnerable dependencies in 9 repos.** 10 npm lockfiles, 3 pinned Python files and 1 Cargo lockfile have advisories, almost all with fixes available (details in §4 and §6). | 9 | They are the first candidates for automated, tested updates. |
+| 2 | **22 of 27 repos have no CI at all, and subsovereign's hasn't run since 8 September (§6).** Only latticeiq, caer and streamly-security-core run tests on push; sentinel runs `pip-audit` only when its requirements file changes. | 22 | Nothing tells anyone when these repos stop building. |
+| 3 | **No repo, in either organisation, has Dependabot or Renovate.** latticeiq has GitHub dependency review on PRs; nothing proposes updates anywhere. | 26 | Advisories are only found when someone looks. |
+| 4 | **Node 20 is end-of-life** (April 2026) but is still the Docker runtime in 6 repos and in the CI of caer and subsovereign, and `engines` fields in 3 repos still allow it. `alpine:3.20` (caer) is also past end of life. | 8 | Runtime security fixes stopped five months ago. |
 | 5 | **Two Rust crates can't build as committed.** `sovereign-agent-queue` and `sovereign-agent-kafka` keep `lib.rs` at the repo root with no `[lib] path`, so Cargo finds no target. Both also depend on `../sovereign-agent` by path, so they only build when checked out next to it. | 2 | Build-health failures that no CI would currently catch. |
 | 6 | **Unpinned or range-only dependencies** with no lockfile: merlyn-forge, llm-gateway (`>=` ranges), and 5 Rust crates without `Cargo.lock`. | 7 | Builds aren't reproducible, so a test today says little about the build tomorrow. |
-| 7 | **Missing basics:** 24 repos have no LICENSE file, 8 have no README. `sovereign-mcp`'s `Cargo.toml` has no `edition`, so it silently builds as Rust 2015. | 24 / 8 / 1 | Consistency drift across the estate. |
+| 7 | **Missing basics:** 25 repos have no LICENSE file, 8 have no README. `sovereign-mcp`'s `Cargo.toml` has no `edition`, so it silently builds as Rust 2015. | 25 / 8 / 1 | Consistency drift across the estate. |
 | 8 | **A 54 MB model file is committed directly** (not Git LFS) in streamly-ai-router: `models/miimagine-v1/adapter_model.safetensors`. | 1 | Every clone and CI checkout pays for it; history grows with each retrain. |
 
 What's in good shape: latticeiq, caer and streamly-security-core are active,
@@ -65,10 +66,12 @@ is committed.
 | streamly-agent-platform | (no README) | JS | 2026-06-21 | — | 0 | ✅ | — |
 | miimagine-docs | Platform documentation | HTML/Markdown | 2026-09-25 | — | — | — | — |
 | cadarn-site | Static site | HTML/CSS | 2026-07-29 | — | — | — | — |
+| **subsovereign** (StreamlyApps) | Subscription platform + 9 SDKs (§6) | TS, Swift, Kotlin | 2026-09-28 | backend, dashboard, sdks ⚠️ not running since 09-08 | 145 | ✅ (9) | node:20-alpine, node:20-bookworm-slim |
 | claude-config | Personal `~/.claude` backup (not scored) | Shell | 2026-09-28 | — | — | — | — |
 
-Stacks across the estate: **Rust 9 repos, JS/TS 9, Python 7**, plus Go in
-latticeiq and Terraform in sovereign-agentic-network. Any maintenance tool has
+Stacks across the estate: **Rust 9 repos, JS/TS 10, Python 7**, plus Go in
+latticeiq, Terraform in sovereign-agentic-network, and Swift and Kotlin in
+subsovereign's mobile SDKs. Any maintenance tool has
 to handle all three ecosystems from day one.
 
 ---
@@ -140,13 +143,13 @@ file was audited instead).
 
 Mapping the four goals onto what the survey found:
 
-1. **Dependency and security updates.** There's real work on day one: 8
+1. **Dependency and security updates.** There's real work on day one: 9
    repos have advisories, nearly all with fixes. Each fix is a patch PatchLab Internal can
    test before and after in a sandbox and hand over with a report. The npm
    bumps (express, fastify, undici, react-router) are the best first
    candidates: they're common, fixes exist, and most of those repos have a
    build or test script to check against.
-2. **Build health.** 22 repos have no CI, so a nightly "does it still build
+2. **Build health.** 22 repos have no CI and subsovereign's CI is stalled, so a nightly "does it still build
    and pass its own tests" run across the estate is the biggest gain for the
    least effort. The two broken Rust crates show it's needed already.
 3. **Consistency and drift.** A baseline worth checking for every repo:
@@ -169,7 +172,60 @@ Things the design needs to handle:
 
 ---
 
-## 6. Method and limits
+## 6. StreamlyApps: subsovereign
+
+`StreamlyApps/subsovereign` is a self-hosted subscription platform (an Adapty
+alternative): a TypeScript backend and dashboard, a CLI, and SDKs for Web,
+JS, React, React Native, Vega (Fire TV), iOS/tvOS (Swift), Android (Kotlin),
+Flutter and Roku. With 850 files and 145 test files, it's the largest and
+best-tested repository in the survey, and the most complex to maintain: 9 npm
+lockfiles, a Gradle build, a Swift package, and CI that needs a macOS runner.
+
+| | |
+|---|---|
+| Last commit | 2026-09-28 |
+| CI workflows | backend, dashboard, sdks (Ubuntu + macOS, Gradle, `swift test`, `xcodebuild`) |
+| Runtimes | Node 20 in CI and in all 3 Dockerfiles (`node:20-alpine`, `node:20-bookworm-slim`); Java 17; Swift tools 5.9 |
+| Dependabot / Renovate | none |
+| LICENSE | none |
+
+**CI isn't actually running.** The last 8 runs on `main` (7–8 September)
+all failed within 3–9 seconds, with no steps, no runner and no logs, so no
+test ran. No run has been recorded since 8 September, although `main` has
+had commits since then (the latest today). That pattern usually means
+Actions is blocked at the account level (a billing or spending limit) or
+disabled for the repository. Someone with access to the StreamlyApps
+settings needs to check. Until it's fixed, nothing is testing the most
+complex repo in the estate.
+
+**npm audit** (per lockfile; "production" excludes devDependencies):
+
+| Package | All deps | Production only | Notes |
+|---|---|---|---|
+| backend | 5 high, 5 moderate | 1 high, 3 moderate | **nodemailer 6.x → 10.0.12** (email sent to an unintended domain); express, body-parser, qs (moderate). The nodemailer fix is a major version bump, so it needs testing. |
+| sdk-vega | 7 high, 3 moderate, 1 low | same | Via the React Native CLI toolchain: `ip` (SSRF), `image-size`, `js-yaml`, `@react-native-community/cli*`. Listed as dependencies, so they ship to anyone installing the SDK. |
+| sdk-react-native | 2 high, 8 moderate | clean | Dev tooling only |
+| sdk-react-native-sample | 10 moderate | — | Sample app |
+| cli, dashboard, sdk-js, sdk-react, sdk-web | clean | clean | |
+
+**Consistency:**
+- The Kotlin plugins differ between `sdk-android` (2.0.21) and
+  `sdk-android-sample` (2.2.0), and so does `compileSdk` (35 vs 36), so the
+  sample isn't testing the SDK on the toolchain the SDK ships with.
+- An empty file named `invalid` was committed to the repo root in today's
+  commit; it looks accidental.
+- Node 20 is end of life (finding 4 applies here too).
+
+**For PatchLab Internal:** subsovereign is the strongest case for the
+before/after testing approach. It has a real test suite, but CI hasn't run
+any of it for three weeks, and the backend nodemailer fix is a major bump
+that needs exactly that kind of check. The macOS-only iOS and tvOS builds are
+out of reach of Linux sandboxes, so the tool must say what it could and
+couldn't verify.
+
+---
+
+## 7. Method and limits
 
 - Shallow clones (`--depth 1`) of each default branch as of 2026-09-28.
 - Stack, manifests, lockfiles, Dockerfiles, CI and test-file counts come from
