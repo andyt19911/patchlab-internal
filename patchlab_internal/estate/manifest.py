@@ -93,11 +93,24 @@ class Package:
 
 
 @dataclass
+class Image:
+    """A Dockerfile the repo ships. Its base images are scanned, and a runtime
+    past end of life is moved to a supported line (images.py)."""
+
+    dockerfile: str
+    # The build context, relative to the repo root (default: the Dockerfile's directory).
+    context: str | None = None
+    # The package (path in this repo) whose checks exercise the code the image runs.
+    package: str | None = None
+
+
+@dataclass
 class Repo:
     name: str
     url: str
     branch: str = "main"
     packages: list[Package] = field(default_factory=list)
+    images: list[Image] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +140,8 @@ class Estate:
     # Dependency updates the tool will never propose (name -> reason).
     ignore: dict[str, str] = field(default_factory=dict)
     repair: RepairAgent | None = None
+    # [sast]: rules = ["repo:path", ...], Opengrep rule directories in the estate's own repos.
+    sast: dict = field(default_factory=dict)
 
     def packages(self) -> list[Package]:
         return [p for r in self.repos for p in r.packages]
@@ -281,11 +296,29 @@ def load(path: str | Path) -> Estate:
             if pkg.check_network not in ("open", "isolated"):
                 raise ConfigError(f"{pw}: check_network must be 'open' or 'isolated'")
             repo.packages.append(pkg)
+        for j, im in enumerate(r.get("image", [])):
+            iw = f"{repo.name} image #{j + 1}"
+            img = Image(dockerfile=str(_req(im, "dockerfile", iw)).strip("/"),
+                        context=(str(im["context"]).strip("/") or ".") if "context" in im else None,
+                        package=(str(im["package"]).strip("/") or ".") if "package" in im else None)
+            for rel in (img.dockerfile, img.context or "."):
+                if ".." in Path(rel).parts or Path(rel).is_absolute():
+                    raise ConfigError(f"{iw}: paths must stay inside the repository")
+            if img.package is not None and img.package not in {p.path for p in repo.packages}:
+                raise ConfigError(f"{iw}: package '{img.package}' is not a package of {repo.name}")
+            repo.images.append(img)
         estate.repos.append(repo)
 
     names = [r.name for r in estate.repos]
     if len(names) != len(set(names)):
         raise ConfigError("repo names must be unique")
+    if "sast" in data:
+        rules = _strs(data["sast"].get("rules", []), "[sast] rules")
+        for spec in rules:
+            repo_name, sep, rel = spec.partition(":")
+            if not sep or repo_name not in names or not rel or ".." in Path(rel).parts or Path(rel).is_absolute():
+                raise ConfigError(f"[sast] rules: {spec!r} must be 'repo:path' naming a repo in this estate")
+        estate.sast = {"rules": rules}
     ids = [p.id for p in estate.packages()]
     if len(ids) != len(set(ids)):
         raise ConfigError("package paths must be unique within a repo")

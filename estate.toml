@@ -29,6 +29,12 @@ name = "streamly-security-core"
 url  = "https://github.com/MIIMAGINELabs/streamly-security-core"
 
 # ---------------------------------------------------------------- subsovereign
+# Code scanning (`estate code-scan`): Opengrep runs these rule directories, read from the
+# estate's own repos at their branch heads. Caer's rules are clean-room and owned by
+# MIIMAGINE AI LTD (caer rulesets/opengrep/README.md). bandit (Python) and gosec (Go) run too.
+[sast]
+rules = ["caer:rulesets/opengrep"]
+
 [[repo]]
 name   = "subsovereign"
 url    = "https://github.com/StreamlyApps/subsovereign"
@@ -107,6 +113,19 @@ branch = "main"
   unsupported = "needs a macOS runner (swift test / xcodebuild)"
 
 # ------------------------------------------------------------------- latticeiq
+  # Dockerfiles: base images scanned with Trivy; a runtime past end of life is
+  # moved to a supported line and tested through the linked package's checks.
+  [[repo.image]]
+  dockerfile = "backend/Dockerfile"
+  package    = "backend"
+
+  [[repo.image]]
+  dockerfile = "dashboard/Dockerfile"
+  context    = "."            # it copies sdk-react/ and docs/ from the repo root
+
+  [[repo.image]]
+  dockerfile = "deploy/haraka/Dockerfile"
+
 [[repo]]
 name   = "latticeiq"
 url    = "https://github.com/MIIMAGINELabs/latticeiq"
@@ -213,6 +232,11 @@ branch = "main"
     category = "build"
 
 # ------------------------------------------------------ streamly-security-core
+  [[repo.image]]
+  dockerfile = "backend/Dockerfile"
+  context    = "."            # it builds scanner-agent/ too
+  package    = "backend"
+
 [[repo]]
 name   = "streamly-security-core"
 url    = "https://github.com/MIIMAGINELabs/streamly-security-core"
@@ -336,6 +360,12 @@ branch = "main"
     run  = "psql -v ON_ERROR_STOP=1 -tA -c \"SELECT CASE WHEN count(*) = 1 THEN 'ok' ELSE 'missing scans.pushed_at (migration 007)' END FROM information_schema.columns WHERE table_name = 'scans' AND column_name = 'pushed_at'\" | tee /dev/stderr | grep -qx ok"
 
 # -------------------------------------------------------------------- sentinel
+  [[repo.image]]
+  dockerfile = "infra/images/jscpd/Dockerfile"
+
+  [[repo.image]]
+  dockerfile = "infra/images/opengrep/Dockerfile"
+
 [[repo]]
 name   = "sentinel"
 url    = "https://github.com/MIIMAGINELabs/sentinel"
@@ -356,6 +386,13 @@ branch = "main"
     results = "junit:/tmp/pytest.junit.xml"
 
 # ---------------------------------------------------------------------- sentry
+  [[repo.image]]
+  dockerfile = "apps/proxy/Dockerfile"
+  package    = "apps/proxy"
+
+  [[repo.image]]
+  dockerfile = "apps/dashboard/Dockerfile"
+
 [[repo]]
 name   = "sentry"
 url    = "https://github.com/MIIMAGINELabs/sentry"

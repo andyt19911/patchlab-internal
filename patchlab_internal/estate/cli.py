@@ -7,7 +7,7 @@ import sys
 
 from ..config import ConfigError
 from ..sandbox import docker_available
-from . import digest, manifest, pipeline, state
+from . import digest, images, manifest, pipeline, state, workflows
 
 
 def _estate(args) -> manifest.Estate:
@@ -37,6 +37,9 @@ def cmd_validate(args) -> int:
                 + (f"; sidecars {', '.join(s.name for s in p.sidecars)}" if p.sidecars else "")
                 + (f"; mirrors {', '.join(p.mirrors)}" if p.mirrors else ""))
         print(f"  {p.id:<32} {what}")
+    for r in est.repos:
+        for i in r.images:
+            print(f"  image   : {r.name}/{i.dockerfile}" + (f" (checks: {r.name}/{i.package})" if i.package else ""))
     return 0
 
 
@@ -103,6 +106,122 @@ def cmd_repair(args) -> int:
     return {"READY": 0, "REVIEW": 0, "BLOCKED": 1, "INCONCLUSIVE": 2}[d["verdict"]]
 
 
+def run_images(est: manifest.Estate, repo: manifest.Repo, propose: bool, sha: str | None = None) -> list[dict]:
+    """Scan a repo's Dockerfiles; with ``propose``, build, test and decide each runtime move
+    (once per commit, Dockerfile and move)."""
+    sha = sha or gitops_head(est, repo)
+    results = []
+    for res in images.scan_repo(est, repo, sha):
+        image = next(i for i in repo.images if i.dockerfile == res["dockerfile"])
+        for move in res.get("moves", []) if propose else []:
+            key = f"{move['runtime']}-{move['from']}-to-{move['to']}"
+            _, prev = state.latest(images.image_dir(est, repo, image) / "proposals" / key, "proposal.json")
+            if prev and prev.get("commit") == sha:
+                continue
+            results.append(images.propose_move(est, repo, image, sha, move))
+    return results
+
+
+def gitops_head(est: manifest.Estate, repo: manifest.Repo) -> str:
+    from . import gitops
+    return gitops.head(pipeline.mirror_path(est, repo.name), repo.branch)
+
+
+def cmd_images(args) -> int:
+    est = _estate(args)
+    _need_docker()
+    repos = [est.repo(n) for n in args.repo] if args.repo else [r for r in est.repos if r.images]
+    worst = 0
+    with state.exclusive(est.state_dir):
+        for repo in repos:
+            results = run_images(est, repo, args.propose, args.commit)
+            for image in repo.images:
+                res = state.read_json(images.image_dir(est, repo, image) / "scan.json") or {}
+                print(f"{repo.name}/{image.dockerfile}" + (f": {res['error']}" if res.get("error") else ""))
+                for b in res.get("bases", []):
+                    sup, sc = b["support"], b["scan"]
+                    life = {"eol": f"END OF LIFE since {sup.get('eol')}", "ok": f"supported to {sup.get('eol')}",
+                            "unknown": "support dates unknown"}[sup["status"]]
+                    vulns = sc.get("error") or (f"{sc['os']}{' (EOSL)' if sc['os_eosl'] else ''}; "
+                                                f"{sum(sc['counts'].values())} vulnerabilities, "
+                                                f"{len(sc['fixable'])} fixable ({sc['fixable_high']} high/critical)")
+                    print(f"  {b['image']:<28} {life}; {vulns}"
+                          + (f"; move to {sup['target']}" if sup.get("target") else ""))
+            for r in results:
+                d = r["decision"]
+                print(f"\n{d['verdict']}: {r['proposal']['plan']['title']}\n  {d['summary']}\n  {r['dir']}")
+                for g in d.get("gate", []):
+                    print(f"    {'ok ' if g['ok'] else 'NO '} {g['name']}: {g['detail']}")
+                worst = max(worst, {"READY": 0, "REVIEW": 0, "BLOCKED": 1, "INCONCLUSIVE": 2}[d["verdict"]])
+    return worst
+
+
+def cmd_code_scan(args) -> int:
+    est = _estate(args)
+    _need_docker()
+    worst = 0
+    with state.exclusive(est.state_dir):
+        for pkg in _packages(est, args.package):
+            if pkg.unsupported:
+                continue
+            d = pipeline.code_scan(est, pkg, args.commit)
+            c = d["counts"]
+            print(f"{pkg.id} @ {d['commit'][:10]}: {c['high']} high, {c['medium']} medium, {c['low']} low"
+                  + ("" if d["complete"] else f"  INCOMPLETE: {d['tools']}"))
+            for p in d["plans"]:
+                print(f"  fix      {p['key']:<50} {p['title']}")
+            worst = max(worst, 0 if d["complete"] else 2)
+    return worst
+
+
+def cmd_code_fix(args) -> int:
+    est = _estate(args)
+    _need_docker()
+    pkg = est.find(args.package)
+    with state.exclusive(est.state_dir):
+        results = pipeline.code_fix_and_test(est, pkg, args.key, args.commit, confirm_failures=not args.no_confirm)
+    worst = 0
+    for r in results:
+        d = r["decision"]
+        print(f"\n{d['verdict']}: {r['proposal']['plan']['title']}\n  {d['summary']}\n  {r['dir']}")
+        for g in d.get("gate", []):
+            print(f"    {'ok ' if g['ok'] else 'NO '} {g['name']}: {g['detail']}")
+        worst = max(worst, {"READY": 0, "REVIEW": 0, "BLOCKED": 1, "INCONCLUSIVE": 2}[d["verdict"]])
+    return worst
+
+
+def run_actions(est: manifest.Estate, repo: manifest.Repo, propose: bool, sha: str | None = None) -> dict | None:
+    sha = sha or gitops_head(est, repo)
+    data = workflows.latest_scan(est, repo, sha)
+    if not propose or not any(f["rule"] == "unpinned-action" for f in data["findings"]):
+        return None
+    _, prev = state.latest(est.state_dir / "workflows" / repo.name, "proposal.json")
+    if prev and prev.get("commit") == sha:
+        return None
+    return workflows.propose(est, repo, sha)
+
+
+def cmd_actions(args) -> int:
+    est = _estate(args)
+    repos = [est.repo(n) for n in args.repo] if args.repo else est.repos
+    worst = 0
+    with state.exclusive(est.state_dir):
+        for repo in repos:
+            r = run_actions(est, repo, args.propose, args.commit)
+            data = state.read_json(est.state_dir / "workflows" / repo.name / "scan.json") or {}
+            by: dict[str, int] = {}
+            for f in data.get("findings", []):
+                by[f["rule"]] = by.get(f["rule"], 0) + 1
+            print(f"{repo.name}: " + (", ".join(f"{n} {k}" for k, n in sorted(by.items())) or "nothing found"))
+            if r:
+                d = r["decision"]
+                print(f"  {d['verdict']}: {r['proposal']['plan']['title']}\n  {d['summary']}\n  {r['dir']}")
+                for g in d["gate"]:
+                    print(f"    {'ok ' if g['ok'] else 'NO '} {g['name']}: {g['detail']}")
+                worst = max(worst, 0 if d["verdict"] == "READY" else 1)
+    return worst
+
+
 def cmd_health(args) -> int:
     est = _estate(args)
     _need_docker()
@@ -150,9 +269,27 @@ def cmd_cycle(args) -> int:
                         pipeline.scan(est, pkg)
                         if pkg.ecosystem in manifest.PROPOSERS:
                             pipeline.propose_and_test(est, pkg)
+                    if step == "propose" and not pkg.unsupported:
+                        code = pipeline.code_scan(est, pkg)
+                        for plan in code["plans"] if est.repair else []:
+                            if not pipeline.code_fixed_already(est, pkg, code["commit"], plan["key"]):
+                                pipeline.code_fix_and_test(est, pkg, plan["key"], code["commit"])
                 except Exception as e:   # recorded in the digest via the missing state, and here
                     failures += 1
                     pipeline.log(f"{pkg.id}: {step} failed: {type(e).__name__}: {e}")
+        for repo in est.repos:
+            if repo.name in heads:
+                try:
+                    run_actions(est, repo, not args.no_propose, heads[repo.name])
+                except Exception as e:
+                    failures += 1
+                    pipeline.log(f"{repo.name}: actions failed: {type(e).__name__}: {e}")
+            if repo.images and repo.name in heads:
+                try:
+                    run_images(est, repo, not args.no_propose, heads[repo.name])
+                except Exception as e:
+                    failures += 1
+                    pipeline.log(f"{repo.name}: images failed: {type(e).__name__}: {e}")
     path = digest.write(est)
     print(path)
     return 2 if failures else 0
@@ -191,11 +328,35 @@ def register(sub) -> None:
     rp.add_argument("--no-confirm", action="store_true")
     rp.set_defaults(func=cmd_repair)
 
+    cs = es.add_parser("code-scan", help="scan packages' own code (Opengrep with [sast] rules, bandit, gosec)")
+    cs.add_argument("package", nargs="*")
+    cs.add_argument("--commit")
+    cs.set_defaults(func=cmd_code_scan)
+
+    cf = es.add_parser("code-fix", help="hand code-scan findings to the [repair] agent, then test and triage")
+    cf.add_argument("package")
+    cf.add_argument("key", nargs="?", help="only this finding group (see code-scan)")
+    cf.add_argument("--commit")
+    cf.add_argument("--no-confirm", action="store_true")
+    cf.set_defaults(func=cmd_code_fix)
+
+    ac = es.add_parser("actions", help="scan CI workflows; --propose pins GitHub Actions to commits")
+    ac.add_argument("repo", nargs="*")
+    ac.add_argument("--commit")
+    ac.add_argument("--propose", action="store_true")
+    ac.set_defaults(func=cmd_actions)
+
     h = es.add_parser("health", help="run each package's checks on the current code (no change)")
     h.add_argument("package", nargs="*")
     h.add_argument("--commit")
     h.add_argument("--no-recheck", action="store_true", help="don't re-run new failures")
     h.set_defaults(func=cmd_health)
+
+    im = es.add_parser("images", help="scan Dockerfile base images; --propose moves runtimes past end of life")
+    im.add_argument("repo", nargs="*")
+    im.add_argument("--commit")
+    im.add_argument("--propose", action="store_true", help="build, test and triage each runtime move")
+    im.set_defaults(func=cmd_images)
 
     d = es.add_parser("digest", help="write today's digest from the state directory")
     d.add_argument("-q", "--quiet", action="store_true", help="print only the path")

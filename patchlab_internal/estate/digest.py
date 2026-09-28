@@ -19,7 +19,7 @@ def collect(estate: Estate) -> list[dict]:
         _, h = state.latest(pdir / "health", "summary.json")
         scan = state.read_json(pdir / "scan.json") or {}
         decisions = []
-        for kind, prefix in (("proposals", ""), ("repairs", "repair of ")):
+        for kind, prefix in (("proposals", ""), ("repairs", "repair of "), ("code-fixes", "code fix: ")):
             props = pdir / kind
             if not props.is_dir():
                 continue
@@ -32,12 +32,82 @@ def collect(estate: Estate) -> list[dict]:
                 if d:
                     prop = state.read_json(run / "proposal.json") or {}
                     decisions.append({"key": prefix + key, "run": str(run), "decision": d, "proposal": prop})
-        rows.append({"package": pkg, "health": h, "scan": scan, "decisions": decisions})
+        rows.append({"package": pkg, "health": h, "scan": scan, "decisions": decisions,
+                     "code": state.read_json(pdir / "sast.json") or {}})
     return rows
+
+
+def collect_images(estate: Estate) -> list[dict]:
+    from . import images
+    out = []
+    for repo in estate.repos:
+        for image in repo.images:
+            d = images.image_dir(estate, repo, image)
+            scan = state.read_json(d / "scan.json")
+            decisions = []
+            if (d / "proposals").is_dir():
+                for key in sorted(p.name for p in (d / "proposals").iterdir() if p.is_dir()):
+                    run, dec = state.latest(d / "proposals" / key, "decision.json")
+                    if dec:
+                        decisions.append({"key": key, "run": str(run), "decision": dec})
+            out.append({"id": f"{repo.name}/{image.dockerfile}", "scan": scan, "decisions": decisions})
+    return out
+
+
+def render_images(items: list[dict]) -> tuple[list[str], list[str]]:
+    """The images table, and what in it needs a person."""
+    if not items:
+        return [], []
+    L = ["## Container images", "", "| Dockerfile | Base images | Runtime moves |", "|---|---|---|"]
+    needs = []
+    for it in items:
+        scan = it["scan"] or {}
+        if not scan:
+            bases = "not scanned yet"
+        elif scan.get("error"):
+            bases = f"not scanned ({scan['error']})"
+        else:
+            parts = []
+            for b in scan.get("bases", []):
+                sup, sc = b["support"], b["scan"]
+                life = "⛔ EOL" if sup["status"] == "eol" else ("?" if sup["status"] == "unknown" else "ok")
+                v = "scan failed" if sc.get("error") else f"{len(sc['fixable'])} fixable ({sc['fixable_high']} high)"
+                parts.append(f"`{b['image']}` {life}, {v}")
+            bases = "<br>".join(parts) or "none"
+        moves = ", ".join(f"{ICON.get(d['decision']['verdict'], '')} {d['key']}" for d in it["decisions"]) or "—"
+        L.append(f"| {it['id']} | {bases} | {moves} |")
+        for d in it["decisions"]:
+            if d["decision"]["verdict"] in ("READY", "REVIEW"):
+                needs.append(f"{it['id']}: review the {d['key']} change ({d['decision']['verdict']})")
+    return L + [""], needs
+
+
+def render_actions(estate: Estate) -> tuple[list[str], list[str]]:
+    L, needs = ["## CI workflows", "", "| Repo | Findings | Pinning |", "|---|---|---|"], []
+    any_row = False
+    for repo in estate.repos:
+        base = estate.state_dir / "workflows" / repo.name
+        scan = state.read_json(base / "scan.json")
+        if not scan:
+            continue
+        any_row = True
+        by: dict[str, int] = {}
+        for f in scan["findings"]:
+            by[f["rule"]] = by.get(f["rule"], 0) + 1
+        _, d = state.latest(base, "decision.json")
+        pin = f"{ICON.get(d['verdict'], '')} {d['verdict']}" if d else "—"
+        if d and d["verdict"] in ("READY", "REVIEW"):
+            needs.append(f"{repo.name}: review the pin-actions change ({d['verdict']})")
+        L.append(f"| {repo.name} | {', '.join(f'{n} {k}' for k, n in sorted(by.items())) or 'none'} | {pin} |")
+    return (L + [""] if any_row else []), needs
 
 
 def render(estate: Estate, rows: list[dict] | None = None) -> str:
     rows = rows if rows is not None else collect(estate)
+    image_lines, image_needs = render_images(collect_images(estate))
+    action_lines, action_needs = render_actions(estate)
+    image_lines += action_lines
+    image_needs += action_needs
     today = dt.date.today().isoformat()
     L = [f"# Estate digest, {today}", ""]
     needs = []
@@ -52,9 +122,11 @@ def render(estate: Estate, rows: list[dict] | None = None) -> str:
         if manual:
             needs.append(f"{r['package'].id}: {len(manual)} vulnerable package(s) with no automatic fix "
                          f"({', '.join(m['name'] for m in manual[:5])})")
+    needs += image_needs
     L += ["## Needs a person", ""] + ([f"- {n}" for n in needs] or ["- Nothing today."]) + [""]
 
-    L += ["## Packages", "", "| Package | Health | Advisories (in production code; ? = not known) | Proposals |", "|---|---|---|---|"]
+    L += ["## Packages", "", "| Package | Health | Advisories (in production code; ? = not known) | Code findings (high) "
+          "| Proposals |", "|---|---|---|---|---|"]
     for r in rows:
         pkg, h, scan = r["package"], r["health"] or {}, r["scan"]
         if pkg.unsupported:
@@ -80,8 +152,16 @@ def render(estate: Estate, rows: list[dict] | None = None) -> str:
         else:
             adv = "not scanned yet"
         props = ", ".join(f"{ICON.get(d['decision']['verdict'], '')} {d['key']}" for d in r["decisions"]) or "—"
-        L.append(f"| {pkg.id} | {health} | {adv} | {props} |")
+        code = r.get("code") or {}
+        if not code:
+            found = "not scanned yet"
+        else:
+            found = f"{sum(code['counts'].values())} ({code['counts']['high']})"
+            if not code.get("complete"):
+                found += " incomplete: " + ", ".join(k for k, v in code.get("tools", {}).items() if v != "ok")
+        L.append(f"| {pkg.id} | {health} | {adv} | {found} | {props} |")
 
+    L += [""] + image_lines if image_lines else []
     for r in rows:
         h = r["health"] or {}
         details = []

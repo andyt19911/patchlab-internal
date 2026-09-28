@@ -105,6 +105,13 @@ def gate_for(report: dict | None, proposal: dict, unsupported: str | None = None
                       "reverting the change restores every baseline check" if rolled and not rb_fail
                       else "rollback not verified", rb_fail))
 
+    if proposal.get("kind") == "code":
+        g += _code_items(proposal)
+        g += [item for item in _repair_items(report, proposal) if item.name != "targets fixed"]
+        if unsupported:
+            g.append(GateItem("platform coverage", False, f"not verified: {unsupported}", kind="review"))
+        return g
+
     if proposal.get("kind") == "repair":
         g += _repair_items(report, proposal)
         if unsupported:
@@ -158,6 +165,27 @@ def gate_for(report: dict | None, proposal: dict, unsupported: str | None = None
     return g
 
 
+def _code_items(proposal: dict) -> list[GateItem]:
+    """A code-scanning fix: the finding is gone on a re-scan, nothing new appeared, nothing was silenced."""
+    g = []
+    if not proposal.get("rescan_complete"):
+        tools = (proposal.get("rescan") or {}).get("tools", {})
+        g.append(GateItem("finding fixed", False, "the re-scan did not complete",
+                          [f"{k}: {v}" for k, v in tools.items() if v != "ok"], kind="inconclusive"))
+        return g
+    remaining = proposal.get("remaining_findings", [])
+    n = len(proposal.get("code_plan", {}).get("fingerprints", []))
+    g.append(GateItem("finding fixed", not remaining, f"{n - len(remaining)} of {n} location(s) no longer "
+                      "reported" if not remaining else "still reported after the change", remaining))
+    new = proposal.get("introduced_findings", [])
+    g.append(GateItem("no new findings", not new, "the re-scan reports nothing new" if not new
+                      else "the change brings in new findings", new))
+    sup = proposal.get("suppressions_added", [])
+    g.append(GateItem("nothing silenced", not sup, "no suppression comment added" if not sup
+                      else "the change adds a comment that silences a scanner", sup))
+    return g
+
+
 def _repair_items(report: dict, proposal: dict) -> list[GateItem]:
     from .repair import fixed_targets
     g = []
@@ -182,7 +210,8 @@ def decide(report: dict | None, proposal: dict, unsupported: str | None = None,
     """``confirm`` is a second run of the same change, made when the first one
     showed regressions: failures present in both are real, the rest flaky."""
     gate = gate_for(report, proposal, unsupported)
-    labels = ["repair", "agent-written"] if proposal.get("kind") == "repair" else ["security"]
+    labels = (["repair", "agent-written"] if proposal.get("kind") == "repair" else
+              ["security", "code", "agent-written"] if proposal.get("kind") == "code" else ["security"])
     plan = proposal.get("plan", {})
     if plan.get("kind") == "major" or proposal.get("major"):
         labels.append("breaking-risk")
@@ -220,6 +249,8 @@ def decide(report: dict | None, proposal: dict, unsupported: str | None = None,
     summary = {
         READY: ("Tested and safe to review: the failing tests now pass, nothing regressed, rollback verified."
                 if proposal.get("kind") == "repair" else
+                "Tested and safe to review: the finding is gone on a re-scan, nothing regressed, rollback verified."
+                if proposal.get("kind") == "code" else
                 "Tested and safe to review: nothing regressed, rollback verified, advisories fixed."),
         REVIEW: "The checks pass, but a person needs to look first: "
                 + "; ".join(g.name for g in failed) + ".",

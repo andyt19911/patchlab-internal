@@ -1,6 +1,6 @@
 # PatchLab Internal: estate control plane
 
-Status: M1, M2 and M6 built and run end to end on 2026-09-28; M3–M5 proposed.
+Status: M1, M2 and M6 built and run end to end on 2026-09-28 (M6 now covers container images, code scanning, committed secrets and CI workflows); M3–M5 proposed.
 Builds on [ESTATE_SURVEY.md](ESTATE_SURVEY.md). Revised after the
 [docs review](#appendix-review-items) of the first version.
 
@@ -381,6 +381,66 @@ in a headless Chromium sidecar and reports, per route, "renders" and "has no
 uncaught errors" as TAP. It has no dependencies (DevTools protocol over a
 minimal WebSocket client), so nothing is installed into the app under test.
 caer's admin console uses it.
+
+### 4.6 Container images (built)
+
+`estate images [--propose]` reads every Dockerfile listed as `[[repo.image]]`.
+
+- **Scan.** Each `FROM` (every stage, not earlier stages or `${ARG}` names) is
+  pulled and scanned with Trivy for OS and bundled language packages. Trivy
+  runs in its own container on a `docker save` of the image, never with the
+  Docker socket.
+- **Support.** The runtime line in the tag (node 20, python 3.11, alpine 3.20)
+  is checked against its end-of-life date: endoflife.date when the runner can
+  reach it, else a dated table in `images.py`. A line past (or within 90 days
+  of) its end gets a move to the lowest supported line with at least a year
+  left; odd Node majors are never proposed.
+- **The move** changes the Dockerfile's `FROM` lines, the `node-version` /
+  `python-version` pins in the CI jobs that build that package (jobs that name
+  its directory; a version matrix is left alone), and `.nvmrc`-style files.
+- **Test.** The linked package's full checks run on today's sandbox image and
+  on the same image moved to the new line; nothing that passes today may fail.
+  Both Dockerfiles are built, and the new base is re-scanned.
+- **Gate.** BLOCKED if a test that passes today fails, the image built before
+  and not after, the new base has more fixable high or critical
+  vulnerabilities, or anything but runtime pins changed. REVIEW when a check
+  could not be made (no package's checks exercise the image, or it doesn't
+  build on this runner either way). A failed scan is INCONCLUSIVE, never a pass.
+
+### 4.7 Code scanning and committed secrets (built)
+
+`estate code-scan` scans each package's own code; `estate code-fix` (and the
+cycle, with `[repair]`) fixes what it finds.
+
+| Tool | What | How it runs |
+|---|---|---|
+| Opengrep 1.4.2 | the rules `[sast] rules` names: Caer's own clean-room rulesets (injection sinks, unsafe deserialisation, quantum-vulnerable crypto) | own image, binary checked against Caer's pinned sha256; `--network none`, read-only |
+| gitleaks 8.30.1 | credentials committed to the code; values redacted by gitleaks itself | own static image built through the Go checksum database; `--network none`, read-only |
+| bandit 1.9.4 | Python | tool container |
+| gosec 2.29.0 | Go | tool container |
+| workflow checks | script injection and `pull_request_target` checkouts in CI (§4.8) | in process |
+
+A finding is identified by tool, rule, file and the flagged line's text, so it
+survives code moving around it. High findings outside test code become one fix
+plan per rule and file. The repair agent gets the locations and the rules (fix
+the cause; no suppression comments; if it is sure it is a false positive, change
+nothing and say why, and a person decides). Its change is tested like any other,
+then the code is **re-scanned**: the gate needs the finding gone, no new high or
+medium finding, no suppression comment added, no regression, rollback verified.
+An incomplete re-scan is INCONCLUSIVE. For a committed secret, the fix moves it
+to configuration and the decision says the credential must still be rotated:
+deleting it from the code does not revoke it, and it stays in history.
+
+### 4.8 CI workflows (built)
+
+`estate actions [--propose]` scans `.github/workflows` for actions used by a
+movable tag, script injection, `pull_request_target` checkouts of PR code and
+workflows with no `permissions:` block. Pinning is deterministic: each tag is
+resolved with `git ls-remote` against the action's repository and the line
+becomes `uses: owner/repo@<sha> # v4`. The gate checks every pin resolved, a
+re-scan finds nothing unpinned, and only `uses:` lines changed; CI then runs
+exactly the code it runs today, so it is READY without a CI run. Script
+injection goes to the repair agent through §4.7.
 
 ## 5. Security
 

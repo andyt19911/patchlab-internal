@@ -31,6 +31,7 @@ from . import bridge, gitops, state, triage
 from .manifest import Estate, Package
 
 BRIEF_PATH = "/tmp/patchlab-brief.md"
+VERDICT_PATH = "/tmp/patchlab-verdict.txt"
 
 # Paths that hold tests or decide how they run. An agent editing these could
 # make a test pass without fixing anything, so such a change needs a person.
@@ -180,6 +181,9 @@ def run_agent(estate: Estate, pkg: Package, sha: str, brief: str, out: Path,
                    timeout=120, workdir="/")
             for name in ("change.patch", "changed.txt", "agent-changed.txt"):
                 tb.copy_out(f"/tmp/{name}", out / name)
+            # An agent that judges the task wrong (a false positive) says so here.
+            if tb.run(f"test -s {VERDICT_PATH}", timeout=30, workdir="/").ok:
+                tb.copy_out(VERDICT_PATH, out / "agent-verdict.txt")
     finally:
         gitops.remove_checkout(checkout)
 
@@ -191,6 +195,8 @@ def run_agent(estate: Estate, pkg: Package, sha: str, brief: str, out: Path,
     result["test_files_changed"] = [c for c in by_agent if TEST_PATH.search(c)]
     result["dependency_files_changed"] = [c for c in by_agent if DEP_MANIFEST.search(c)]
     result["diffstat"] = gitops.diff_stat(out / "change.patch") if changed else []
+    if (out / "agent-verdict.txt").is_file():
+        result["agent_verdict"] = (out / "agent-verdict.txt").read_text(encoding="utf-8", errors="replace")[:2000]
     return result
 
 

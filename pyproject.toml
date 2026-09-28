@@ -18,4 +18,4 @@ patchlab-internal = "patchlab_internal.cli:main"
 include = ["patchlab_internal", "patchlab_internal.*"]
 
 [tool.setuptools.package-data]
-patchlab_internal = ["ps/*.ps1", "ps/guest/*.ps1", "assets/*.mjs"]
+patchlab_internal = ["ps/*.ps1", "ps/guest/*.ps1", "assets/*.mjs", "assets/*.Dockerfile"]

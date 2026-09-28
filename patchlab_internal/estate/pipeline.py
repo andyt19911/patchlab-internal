@@ -13,7 +13,7 @@ from pathlib import Path
 from .. import report as engine_report
 from .. import runner
 from ..config import Patch
-from . import advisories, bridge, fixers, gitops, manifest, npm, repair, state, triage
+from . import advisories, bridge, fixers, gitops, manifest, npm, repair, sast, state, triage
 from .manifest import Estate, Package
 
 
@@ -476,6 +476,112 @@ def repair_pr_body(pkg: Package, prop: dict, decision: triage.Decision) -> str:
         L += ["", "## What this does not prove", ""] + [f"- {x}" for x in pkg.not_covered]
     L.append("")
     return "\n".join(L)
+
+
+# ---------------------------------------------------------------- code scanning
+
+def code_scan(estate: Estate, pkg: Package, commit: str | None = None) -> dict:
+    sha = resolve(estate, pkg, commit)
+    log(f"{pkg.id}: code scan at {sha[:10]}")
+    data = sast.save(estate, pkg, sha, sast.scan(estate, pkg, sha))
+    log(f"{pkg.id}: code scan: {data['counts']['high']} high, {data['counts']['medium']} medium; "
+        f"{len(data['plans'])} to fix" + ("" if data["complete"] else f" (incomplete: {data['tools']})"))
+    return data
+
+
+def code_fix_and_test(estate: Estate, pkg: Package, key: str | None = None, commit: str | None = None,
+                      confirm_failures: bool = True) -> list[dict]:
+    """For each blocking finding group (or just ``key``): the repair agent fixes it,
+    then test, re-scan and triage."""
+    if estate.repair is None:
+        raise RuntimeError("no [repair] agent in estate.toml")
+    sha = resolve(estate, pkg, commit)
+    scanned = state.read_json(estate.state_dir / pkg.slug / "sast.json")
+    if not scanned or scanned.get("commit") != sha:
+        scanned = code_scan(estate, pkg, sha)
+    todo = [p for p in scanned["plans"] if not key or p["key"] == key]
+    if key and not todo:
+        raise RuntimeError(f"{pkg.id}: no finding group '{key}' at {sha[:10]}")
+    before = sast.result_from(scanned)
+    results = []
+    for plan in todo:
+        run_id = bridge.new_id("code")
+        out = estate.state_dir / pkg.slug / "code-fixes" / plan["key"] / run_id
+        log(f"{pkg.id}: asking the repair agent to fix {plan['title']}")
+        prop = {"kind": "code", "package": pkg.id, "commit": sha, "targets": [], "code_plan": plan,
+                "plan": {"kind": "code", "key": plan["key"], "title": f"fix {plan['title']}"}}
+        try:
+            prop.update(repair.run_agent(estate, pkg, sha, sast.write_brief(pkg, sha, plan), out))
+        except RuntimeError as e:
+            log(f"{pkg.id}: repair agent could not run: {e}")
+            break
+        if plan["tool"] == "gitleaks":
+            prop["notes"].append("Removing a credential from the code does not revoke it, and it stays in git "
+                                 "history: whoever owns it must rotate it.")
+        if not prop["changed_files"]:
+            fp = prop.get("agent_verdict", "").strip()
+            decision = triage.Decision(
+                triage.REVIEW if fp.startswith("FALSE_POSITIVE") else triage.BLOCKED,
+                ("The agent judged this a false positive and changed nothing; a person decides: " + fp[15:].strip()
+                 if fp.startswith("FALSE_POSITIVE") else "The agent made no change."),
+                [], ["security", "code", "false-positive" if fp else "agent-written"], notes=prop["notes"])
+            state.write_json(out / "proposal.json", {**prop, "status": "no-change"})
+            state.write_json(out / "decision.json", decision.to_dict())
+            results.append({"proposal": prop, "decision": decision.to_dict(), "dir": str(out)})
+            continue
+        prop["status"] = "proposed"
+        prop["suppressions_added"] = sast.suppressions_added((out / "change.patch").read_text(errors="replace"))
+        after = sast.scan(estate, pkg, sha, out / "change.patch")
+        prop["rescan"] = after.to_dict()
+        prop["rescan_complete"] = after.complete and before.complete
+        after_fps = {f.fingerprint for f in after.findings}
+        before_fps = {f.fingerprint for f in before.findings}
+        prop["remaining_findings"] = [fp for fp in plan["fingerprints"] if fp in after_fps]
+        prop["introduced_findings"] = [f"{f.rule} {f.file}:{f.line}" for f in after.findings
+                                       if f.fingerprint not in before_fps and f.severity in ("high", "medium")]
+        state.write_json(out / "proposal.json", prop)
+        label = f"code fix: {plan['rule']} in {plan['file']}"
+        first = test_change(estate, pkg, sha, out / "change.patch", label, out / "runs", run_id + "-1")
+        confirm = None
+        if confirm_failures and first.report and triage.regressions(first.report):
+            confirm = test_change(estate, pkg, sha, out / "change.patch", label, out / "runs", run_id + "-2").report
+        decision = triage.decide(first.report, prop, pkg.unsupported, confirm)
+        state.write_json(out / "decision.json", decision.to_dict())
+        (out / "pr.md").write_text(code_pr_body(pkg, prop, decision), encoding="utf-8")
+        log(f"{pkg.id}: {plan['key']}: {decision.verdict}. {decision.summary}")
+        results.append({"proposal": prop, "decision": decision.to_dict(), "dir": str(out),
+                        "report": str(first.report_dir) if first.report_dir else None})
+    return results
+
+
+def code_fixed_already(estate: Estate, pkg: Package, sha: str, key: str) -> bool:
+    for p in (estate.state_dir / pkg.slug / "code-fixes" / key).glob("*/proposal.json"):
+        if (state.read_json(p) or {}).get("commit") == sha:
+            return True
+    return False
+
+
+def code_pr_body(pkg: Package, prop: dict, decision: triage.Decision) -> str:
+    plan = prop["code_plan"]
+    f0 = plan["findings"][0]
+    L = [f"# Fix {plan['rule']} in {plan['file']}", "",
+         f"**PatchLab Internal verdict: {decision.verdict}.** {decision.summary}", "",
+         f"Before: {plan['tool']} flags {len(plan['findings'])} location(s) in `{plan['file']}`"
+         + (f" ({f0['cwe']})" if f0["cwe"] else "") + f": {f0['message']}", "",
+         "After: the re-scan no longer reports them" if not prop.get("remaining_findings")
+         else "After: the re-scan still reports some of them.", "",
+         "Written by a coding agent, then tested by PatchLab Internal: the package's checks ran before and "
+         "after the change and again after rolling it back, and the code was scanned again.", "",
+         "## Locations", ""] + [f"- line {f['line']}: `{f['code'].strip()[:120]}`" for f in plan["findings"]]
+    L += ["", "## What changed", ""] + [f"- `{x}`" for x in prop.get("diffstat", [])]
+    L += ["", "## Gate", "", "| Check | Result | Detail |", "|---|---|---|"]
+    for g in decision.gate:
+        L.append(f"| {g.name} | {'✅' if g.ok else ('⚠️' if g.kind == 'review' else '❌')} | {g.detail} |")
+    if decision.notes:
+        L += ["", "## Notes", ""] + [f"- {n}" for n in decision.notes]
+    if pkg.not_covered:
+        L += ["", "## What this does not prove", ""] + [f"- {x}" for x in pkg.not_covered]
+    return "\n".join(L) + "\n"
 
 
 # ---------------------------------------------------------------- health
