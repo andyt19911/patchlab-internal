@@ -9,6 +9,10 @@
 #   PATCHLAB_TOKEN_MIIMAGINELABS  MIIMAGINELabs/{latticeiq, streamly-security-core, caer, sentinel, sentry}
 #   ANTHROPIC_API_KEY             optional: only when [repair] is configured in estate.toml
 #
+# Which repos: the repository variable PATCHLAB_ESTATE_REPOS (comma-separated, or "all").
+# Unset, it is latticeiq only, while the first runs are watched (Andy, 2026-09-28); that
+# needs only PATCHLAB_TOKEN_MIIMAGINELABS (latticeiq, plus caer for the code-scanning rules).
+#
 # State (the last health runs, what was published) carries over between runs in the
 # Actions cache; the digest is the run's summary and an artifact.
 name: Estate nightly
@@ -36,6 +40,7 @@ jobs:
     timeout-minutes: 350
     env:
       PATCHLAB_INTERNAL_ESTATE_WORKDIR: ${{ github.workspace }}/.estate
+      ESTATE_REPOS: ${{ vars.PATCHLAB_ESTATE_REPOS || 'latticeiq' }}
       PATCHLAB_INTERNAL_GITHUB_TOKEN_STREAMLYAPPS: ${{ secrets.PATCHLAB_TOKEN_STREAMLYAPPS }}
       PATCHLAB_INTERNAL_GITHUB_TOKEN_MIIMAGINELABS: ${{ secrets.PATCHLAB_TOKEN_MIIMAGINELABS }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -58,7 +63,10 @@ jobs:
       - name: Check the tokens are there
         run: |
           missing=""
-          [ -n "$PATCHLAB_INTERNAL_GITHUB_TOKEN_STREAMLYAPPS" ] || missing="$missing PATCHLAB_TOKEN_STREAMLYAPPS"
+          case ",$ESTATE_REPOS," in
+            *,all,*|*,subsovereign,*)
+              [ -n "$PATCHLAB_INTERNAL_GITHUB_TOKEN_STREAMLYAPPS" ] || missing="$missing PATCHLAB_TOKEN_STREAMLYAPPS" ;;
+          esac
           [ -n "$PATCHLAB_INTERNAL_GITHUB_TOKEN_MIIMAGINELABS" ] || missing="$missing PATCHLAB_TOKEN_MIIMAGINELABS"
           if [ -n "$missing" ]; then echo "::error::Add these repository secrets:$missing"; exit 1; fi
           python -m patchlab_internal estate validate
@@ -71,6 +79,7 @@ jobs:
       - name: Cycle
         id: cycle
         run: |
+          if [ "$ESTATE_REPOS" != "all" ]; then export PATCHLAB_INTERNAL_ESTATE_REPOS="$ESTATE_REPOS"; fi
           python -m patchlab_internal estate cycle ${{ inputs.no_propose && '--no-propose' || '' }} | tee digest-path.txt
       - name: Digest
         if: always()

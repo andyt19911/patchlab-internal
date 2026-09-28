@@ -594,7 +594,12 @@ GitHub-hosted runner (Andy's choice, 2026-09-28), and on demand. State
 carries over in the Actions cache; the digest is the run summary and an
 artifact with every decision, PR body and patch. It needs one read-only token
 per owner as repository secrets (the workflow's header lists them) and runs
-only from the default branch, so it starts once this branch is merged.
+only from the default branch, so it starts once this branch is merged. It
+starts on latticeiq alone, to be watched over a few runs (Andy, 2026-09-28):
+the repository variable `PATCHLAB_ESTATE_REPOS` widens it (`all`, or a
+comma-separated list), and `estate cycle --repo` does the same by hand. Repos
+outside the list are neither synced nor touched, except caer's rules for code
+scanning.
 
 ### M4: draft PRs — built 2026-09-28, off
 

@@ -474,6 +474,19 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(list(errors), ["app"])
         self.assertIn("https://github.com/Org/other", calls)
 
+    def test_a_limited_sync_skips_other_repos_and_their_mirrors(self):
+        os.environ.pop("PATCHLAB_INTERNAL_ESTATE_WORKDIR", None)
+        est = manifest.load(write_manifest(MINIMAL + '\n[[repo]]\nname = "other"\nurl = "https://github.com/Org/other"\n'))
+        calls = []
+        real_sync, real_head = gitops.sync_mirror, gitops.head
+        gitops.sync_mirror, gitops.head = (lambda url, dest: calls.append(url)), (lambda m, b: "f" * 40)
+        try:
+            heads, errors = pipeline.sync(est, ["other"])
+        finally:
+            gitops.sync_mirror, gitops.head = real_sync, real_head
+        self.assertEqual((heads, errors), ({"other": "f" * 40}, {}))
+        self.assertEqual(calls, ["https://github.com/Org/other"])      # not app, not app's mirror "core"
+
 
 class HealthAndDigestTests(unittest.TestCase):
     def test_health_summary_tracks_new_and_fixed_failures(self):

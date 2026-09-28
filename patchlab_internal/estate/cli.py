@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from ..config import ConfigError
@@ -263,8 +264,28 @@ def cmd_cycle(args) -> int:
     est = _estate(args)
     _need_docker()
     failures = 0
+    # Limit a cycle to some repos (--repo, or PATCHLAB_INTERNAL_ESTATE_REPOS="a,b"), e.g. while
+    # a new runner is watched over a few nights. The rest are neither synced nor touched.
+    only = args.repo or [r.strip() for r in os.environ.get("PATCHLAB_INTERNAL_ESTATE_REPOS", "").split(",")
+                         if r.strip()]
+    for name in only:
+        est.repo(name)                      # an unknown name is an error, not a silent no-op
+    rule_repos = {spec.partition(":")[0] for spec in est.sast.get("rules", [])}
+    if only:
+        est.all_repos = list(est.repos)
+        est.repos = [r for r in est.repos if r.name in only]
+        pipeline.log(f"cycle limited to {', '.join(only)}")
     with state.exclusive(est.state_dir):
         heads, errors = pipeline.sync(est)
+        # Code-scanning rules come from the estate's own repos: keep those current too.
+        for r in est.all_repos:
+            if r.name in rule_repos and r.name not in only:
+                try:
+                    from . import gitops
+                    gitops.sync_mirror(r.url, pipeline.mirror_path(est, r.name))
+                except Exception as e:
+                    failures += 1
+                    pipeline.log(f"sync {r.name} (code-scanning rules) failed: {e}")
         for name, err in errors.items():
             failures += 1
             pipeline.log(f"sync {name} failed: {err}")
@@ -393,6 +414,8 @@ def register(sub) -> None:
 
     c = es.add_parser("cycle", help="the scheduled job: sync, health, scan, propose, digest")
     c.add_argument("--no-propose", action="store_true", help="health and digest only")
+    c.add_argument("--repo", action="append", help="only this repo (repeatable; default: all, or "
+                   "PATCHLAB_INTERNAL_ESTATE_REPOS)")
     c.set_defaults(func=cmd_cycle)
 
 

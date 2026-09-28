@@ -207,7 +207,7 @@ def rules_dir(estate) -> tuple[Path | None, dict]:
     meta, parts = {}, []
     for spec in specs:
         repo_name, _, path = spec.partition(":")
-        repo = estate.repo(repo_name)
+        repo = next(r for r in (estate.all_repos or estate.repos) if r.name == repo_name)
         mirror = estate.repos_dir / f"{repo.name}.git"
         sha = gitops.head(mirror, repo.branch)
         meta[spec] = sha

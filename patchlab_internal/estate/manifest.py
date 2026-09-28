@@ -142,6 +142,8 @@ class Estate:
     repair: RepairAgent | None = None
     # [sast]: rules = ["repo:path", ...], Opengrep rule directories in the estate's own repos.
     sast: dict = field(default_factory=dict)
+    # Every repo in the manifest, when a cycle is limited to some (rule sources still need theirs).
+    all_repos: list[Repo] = field(default_factory=list)
 
     def packages(self) -> list[Package]:
         return [p for r in self.repos for p in r.packages]

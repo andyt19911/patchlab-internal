@@ -34,7 +34,11 @@ def sync(estate: Estate, only: list[str] | None = None) -> tuple[dict[str, str],
     stops the others; a failed mirror fails every repo, because packages that
     need it would install stale code."""
     heads, errors = {}, {}
+    # Only the private-dependency mirrors the synced repos' packages use.
+    wanted = {m for r in estate.repos if not only or r.name in only for p in r.packages for m in p.mirrors}
     for name, spec in estate.mirrors.items():
+        if name not in wanted:
+            continue
         log(f"mirror {name} <- {spec.url}")
         try:
             gitops.sync_mirror(spec.url, estate.mirrors_dir / f"{name}.git")
