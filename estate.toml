@@ -93,3 +93,244 @@ branch = "main"
   path        = "sdk-ios"
   ecosystem   = "swift"
   unsupported = "needs a macOS runner (swift test / xcodebuild)"
+
+# ------------------------------------------------------------------- latticeiq
+[[repo]]
+name   = "latticeiq"
+url    = "https://github.com/MIIMAGINELabs/latticeiq"
+branch = "main"
+
+  # The same steps and throwaway values as the backend job in .github/workflows/ci.yml.
+  [[repo.package]]
+  path      = "backend"
+  ecosystem = "python"
+  image     = "python:3.14-bookworm"
+  install   = ["pip install --no-cache-dir --disable-pip-version-check -r requirements-dev.txt"]
+  memory    = "4g"
+  not_covered = [
+    "Live TLS and SSH probes: the tests stub the scanner binary, and checks run with no network.",
+    "The API container image (CI's image job builds backend/Dockerfile; this runs the source).",
+  ]
+
+    [repo.package.env]
+    APP_ENV           = "test"
+    APP_SECRET_KEY    = "ci-only-not-a-real-secret"
+    DATABASE_URL      = "postgresql+asyncpg://latticeiq_app:ci-app-password-000@postgres:5432/latticeiq"
+    DATABASE_SYSTEM_URL = "postgresql+asyncpg://latticeiq_system:ci-system-password-000@postgres:5432/latticeiq"
+    DATABASE_SYNC_URL = "postgresql+psycopg2://latticeiq:latticeiq@postgres:5432/latticeiq"
+    REDIS_URL         = "redis://localhost:6379/0"
+    API_KEY_PEPPER    = "ci0only0pepper0000000000000000000000000000000000000000000000000"
+    REQUIRE_DB_TESTS  = "1"
+
+    [[repo.package.sidecars]]
+    name   = "postgres"
+    image  = "postgres:18-alpine"
+    env    = { POSTGRES_USER = "latticeiq", POSTGRES_PASSWORD = "latticeiq", POSTGRES_DB = "latticeiq" }
+    health = "pg_isready -U latticeiq"
+
+    [[repo.package.checks]]
+    name     = "migrations-apply"
+    run      = "alembic upgrade head"
+    category = "build"
+
+    [[repo.package.checks]]
+    name     = "migrations-reversible"
+    run      = "alembic downgrade base && alembic upgrade head"
+    category = "build"
+
+    [[repo.package.checks]]
+    name     = "models-match-migrations"
+    run      = "alembic check"
+    category = "build"
+
+    [[repo.package.checks]]
+    name     = "provision-rls-roles"
+    run      = "python -m scripts.provision_db_roles --app-password ci-app-password-000 --system-password ci-system-password-000"
+    category = "build"
+
+    [[repo.package.checks]]
+    name    = "tests"
+    run     = "python -m pytest tests/ -q -p no:cacheprovider --junitxml=/tmp/pytest.junit.xml"
+    results = "junit:/tmp/pytest.junit.xml"
+    timeout = 1800
+
+  [[repo.package]]
+  path      = "scanner-agent"
+  ecosystem = "go"
+  # go.mod asks for Go 1.27; GOTOOLCHAIN=local stops go from fetching another one mid-check.
+  image     = "golang:1.27-bookworm"
+  install   = ["go mod download"]
+  env       = { GOTOOLCHAIN = "local", GOFLAGS = "-mod=readonly" }
+  not_covered = ["Probes against live hosts: the checks run with no network."]
+
+    [[repo.package.checks]]
+    name     = "build"
+    run      = "go build ./..."
+    category = "build"
+
+    [[repo.package.checks]]
+    name     = "vet"
+    run      = "go vet ./..."
+    category = "build"
+
+    [[repo.package.checks]]
+    name    = "tests"
+    run     = "go test -count=1 ./..."
+    timeout = 1200
+
+  [[repo.package]]
+  path      = "frontend"
+  ecosystem = "npm"
+  image     = "node:24-bookworm"
+  install   = ["npm ci --no-audit --no-fund"]
+
+    [[repo.package.checks]]
+    name     = "typecheck"
+    run      = "npx tsc --noEmit"
+    category = "build"
+
+    [[repo.package.checks]]
+    name    = "tests"
+    run     = "npx vitest run --reporter=default --reporter=junit --outputFile.junit=/tmp/vitest.junit.xml"
+    results = "junit:/tmp/vitest.junit.xml"
+
+    [[repo.package.checks]]
+    name     = "production-build"
+    run      = "npm run build"
+    category = "build"
+
+# ------------------------------------------------------ streamly-security-core
+[[repo]]
+name   = "streamly-security-core"
+url    = "https://github.com/MIIMAGINELabs/streamly-security-core"
+branch = "main"
+
+  [[repo.package]]
+  path      = "."
+  ecosystem = "npm"
+  # CI runs Node 20, 22 and 24. The gate runs one image, so it uses 24: the
+  # only one whose OpenSSL (3.5) has ML-KEM, which the cross-check tests need.
+  image     = "node:24-bookworm"
+  install   = ["npm ci --no-audit --no-fund"]
+  not_covered = ["Node 20 and 22, which the repo's CI matrix also runs."]
+
+    [[repo.package.checks]]
+    name = "tests"
+    run  = "npm test"
+
+    [[repo.package.checks]]
+    name = "enterprise-tests"
+    run  = "npm run test:enterprise"
+
+# ------------------------------------------------------------------------ caer
+[[repo]]
+name   = "caer"
+url    = "https://github.com/MIIMAGINELabs/caer"
+branch = "main"
+
+  [[repo.package]]
+  path      = "packages/orchestrator"
+  ecosystem = "npm"
+  image     = "node:20-bookworm"
+  install   = ["npm ci --no-audit --no-fund"]
+  not_covered = ["The scan engines themselves (Opengrep and friends run in their own images)."]
+
+    [[repo.package.checks]]
+    name     = "typecheck"
+    run      = "npm run typecheck"
+    category = "build"
+
+    # TAP gives the gate one result per test, not just the exit code.
+    [[repo.package.checks]]
+    name    = "tests"
+    run     = "NODE_OPTIONS=--test-reporter=tap npm test"
+    results = "tap"
+
+  [[repo.package]]
+  path      = "packages/admin-console"
+  ecosystem = "npm"
+  image     = "node:20-bookworm"
+  install   = ["npm ci --no-audit --no-fund"]
+  not_covered = ["Behaviour: the package has no tests, only a typecheck."]
+
+    [[repo.package.checks]]
+    name     = "typecheck"
+    run      = "npm run typecheck"
+    category = "build"
+
+  # The migrations job in .github/workflows/ci.yml. The sandbox is a Postgres
+  # image only for its psql client; the database is the sidecar.
+  [[repo.package]]
+  path      = "packages/shared-schema"
+  ecosystem = "sql"
+  image     = "postgres:16"
+  env       = { PGHOST = "postgres", PGUSER = "postgres", PGPASSWORD = "postgres", PGDATABASE = "caer" }
+
+    [[repo.package.sidecars]]
+    name   = "postgres"
+    image  = "postgres:16-alpine"
+    env    = { POSTGRES_USER = "postgres", POSTGRES_PASSWORD = "postgres", POSTGRES_DB = "caer" }
+    health = "pg_isready -U postgres"
+
+    # Run from the repo root, as CI does: the data-migration tests \i the
+    # migrations by their repo-relative path. Each run starts from an empty
+    # database, so a re-run can't pass on leftovers.
+    [[repo.package.checks]]
+    name     = "migrations-from-empty"
+    run      = "cd ../.. && psql -v ON_ERROR_STOP=1 -q -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' && for f in $(ls packages/shared-schema/migrations/*.sql | sort); do echo \"== $f\"; psql -v ON_ERROR_STOP=1 -q -f \"$f\" || exit 1; done"
+    category = "build"
+
+    [[repo.package.checks]]
+    name = "data-migrations"
+    run  = "cd ../.. && for f in $(ls packages/shared-schema/tests/*.sql 2>/dev/null | sort); do echo \"== $f\"; psql -v ON_ERROR_STOP=1 -q -f \"$f\" || exit 1; done"
+
+    [[repo.package.checks]]
+    name = "orchestrator-schema"
+    run  = "psql -v ON_ERROR_STOP=1 -tA -c \"SELECT CASE WHEN count(*) = 1 THEN 'ok' ELSE 'missing scans.pushed_at (migration 007)' END FROM information_schema.columns WHERE table_name = 'scans' AND column_name = 'pushed_at'\" | tee /dev/stderr | grep -qx ok"
+
+# -------------------------------------------------------------------- sentinel
+[[repo]]
+name   = "sentinel"
+url    = "https://github.com/MIIMAGINELabs/sentinel"
+branch = "main"
+
+  [[repo.package]]
+  path      = "apps/proxy"
+  ecosystem = "python"
+  # The proxy's Dockerfile and pip-audit workflow both use Python 3.11.
+  image     = "python:3.11-bookworm"
+  # requirements.txt has no test tools; these are the ones CLAUDE.md names.
+  install   = ["pip install --no-cache-dir --disable-pip-version-check -r requirements.txt pytest pytest-asyncio"]
+  not_covered = ["The Next.js dashboard (no lockfile, so it can't be installed reproducibly)."]
+
+    [[repo.package.checks]]
+    name    = "tests"
+    run     = "python -m pytest tests/ -q -p no:cacheprovider --junitxml=/tmp/pytest.junit.xml"
+    results = "junit:/tmp/pytest.junit.xml"
+
+# ---------------------------------------------------------------------- sentry
+[[repo]]
+name   = "sentry"
+url    = "https://github.com/MIIMAGINELabs/sentry"
+branch = "master"
+
+  # No CI in the repo yet; these are the commands BUILD.md reports as passing.
+  [[repo.package]]
+  path      = "."
+  ecosystem = "cargo"
+  image     = "rust:1-bookworm"
+  install   = ["cargo fetch --locked"]
+  memory    = "6g"
+  cpus      = "4"
+  not_covered = ["OpenBao: the tests use the in-process secret store, not a live OpenBao."]
+
+    [[repo.package.checks]]
+    name     = "build"
+    run      = "cargo build --workspace --locked --all-targets"
+    category = "build"
+    timeout  = 2400
+
+    [[repo.package.checks]]
+    name    = "tests"
+    run     = "cargo test --workspace --locked --no-fail-fast"
+    timeout = 1800

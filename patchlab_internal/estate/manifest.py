@@ -10,10 +10,13 @@ from pathlib import Path
 
 from ..config import Check, ConfigError, Sidecar, parse_sidecars
 
-ECOSYSTEMS = ("npm", "python", "cargo", "go", "gradle", "swift")
+# "sql" is a schema with no package manager: health checks only, nothing to scan.
+ECOSYSTEMS = ("npm", "python", "cargo", "go", "gradle", "swift", "sql")
 # Ecosystems the estate layer can scan and propose updates for today. The
 # others can still have health checks; their advisories are reported as not scanned.
 PROPOSERS = ("npm",)
+# Ecosystems whose advisories are scanned and reported (proposals need a PROPOSER).
+SCANNERS = ("npm", "python", "go", "cargo")
 PUBLISH_MODES = ("report-only", "draft-pr")
 
 # Values that look like real credentials. estate.toml is committed and its env

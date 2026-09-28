@@ -212,8 +212,22 @@ Advisories are grouped into proposals:
   isn't a direct dependency. Reported with the reason.
 - **ignored**: listed in `[ignore]` in the manifest with a reason.
 
-Python (pip-audit), Cargo (cargo audit) and Go (govulncheck) scanners are M2;
-until then those packages show "not scanned", not "clean".
+Python, Go and Cargo packages are scanned with their own ecosystem's tool, in
+a tool container, and reported but not yet proposed (`estate/advisories.py`):
+
+- **Python**: the package's install commands run, `pip freeze` records exactly
+  what was installed (transitive dependencies included), and `pip-audit
+  --no-deps --disable-pip` audits that list from its own virtualenv, so neither
+  it nor its dependencies are in the result.
+- **Go**: `govulncheck -format json`, counting only advisories whose vulnerable
+  code the module calls, as latticeiq's CI does.
+- **Cargo**: `cargo audit --json` against `Cargo.lock`. Unmaintained, unsound
+  and yanked crates are listed at severity "info".
+
+The tools are pinned. None of them reports a severity for every advisory, so
+these show severity "unknown" rather than a guess, and the digest marks their
+production share as unknown. Packages with no scanner (`swift`, `sql`) show
+"not scanned", never "clean".
 
 #### 4.1.2 Propose
 

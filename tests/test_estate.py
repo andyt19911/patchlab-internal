@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from patchlab_internal.config import ConfigError
-from patchlab_internal.estate import digest, manifest, npm, pipeline, state, triage
+from patchlab_internal.estate import advisories, digest, gitops, manifest, npm, pipeline, state, triage
 from patchlab_internal.linux import sandbox_env
 from patchlab_internal.estate import bridge
 
@@ -73,7 +73,11 @@ class ManifestTests(unittest.TestCase):
 
     def test_the_committed_manifest_is_valid(self):
         est = manifest.load(ROOT / "estate.toml")
-        self.assertIn("subsovereign/backend", [p.id for p in est.packages()])
+        self.assertEqual({r.name for r in est.repos},
+                         {"subsovereign", "latticeiq", "streamly-security-core", "caer", "sentinel", "sentry"})
+        for pkg in est.packages():
+            if not pkg.unsupported:
+                self.assertTrue(pkg.checks, pkg.id)
 
     def test_real_credentials_are_refused(self):
         for value in ("ghp_" + "a" * 36, "github_pat_" + "B" * 40, "AKIA" + "A" * 16,
@@ -302,6 +306,80 @@ class GateTests(unittest.TestCase):
         self.assertEqual(triage.decide(first, GOOD_PROPOSAL, confirm=second).verdict, triage.INCONCLUSIVE)
         again = report([check("tests", "ok", case_regressions=["a"])], "FAIL")
         self.assertEqual(triage.decide(first, GOOD_PROPOSAL, confirm=again).verdict, triage.BLOCKED)
+
+
+class AdvisoryParserTests(unittest.TestCase):
+    def test_pip_audit(self):
+        out = json.dumps({"dependencies": [
+            {"name": "jinja2", "version": "3.1.2", "vulns": [
+                {"id": "GHSA-h5c8-rqwp-cp95", "fix_versions": ["3.1.3"], "description": "XSS"},
+                {"id": "PYSEC-2024-1", "fix_versions": ["3.1.4"], "description": "more"}]},
+            {"name": "fastapi", "version": "0.139.0", "vulns": []}], "fixes": []})
+        scan = advisories.parse_pip_audit(out)
+        self.assertIsNone(scan.error)
+        self.assertEqual([v.name for v in scan.vulnerable], ["jinja2"])
+        v = scan.vulnerable[0]
+        self.assertEqual((v.fix_version, v.severity), ("3.1.4", "unknown"),
+                         "no severity is invented when the tool gives none")
+        self.assertEqual(scan.advisory_ids(), {"GHSA-h5c8-rqwp-cp95", "PYSEC-2024-1"})
+
+    def test_garbage_is_an_error_not_a_clean_bill(self):
+        for parse in (advisories.parse_pip_audit, advisories.parse_govulncheck,
+                      advisories.parse_cargo_audit):
+            self.assertIsNotNone(parse("Traceback (most recent call last)").error, parse.__name__)
+
+    def test_govulncheck_counts_only_called_code(self):
+        stream = "\n".join(json.dumps(o, indent=2) for o in [
+            {"config": {"scanner_name": "govulncheck"}},
+            {"osv": {"id": "GO-2025-0001", "summary": "called"}},
+            {"osv": {"id": "GO-2025-0002", "summary": "imported only"}},
+            {"finding": {"osv": "GO-2025-0001", "fixed_version": "v0.9.0", "trace": [
+                {"module": "golang.org/x/net", "version": "v0.8.0", "package": "golang.org/x/net/html",
+                 "function": "Parse"}]}},
+            {"finding": {"osv": "GO-2025-0002", "trace": [
+                {"module": "golang.org/x/text", "version": "v0.3.0", "package": "golang.org/x/text/unicode"}]}},
+        ])
+        scan = advisories.parse_govulncheck(stream)
+        self.assertIsNone(scan.error)
+        self.assertEqual([v.name for v in scan.vulnerable], ["golang.org/x/net"])
+        self.assertEqual(scan.vulnerable[0].fix_version, "v0.9.0")
+        self.assertEqual(advisories.parse_govulncheck("").vulnerable, [])
+
+    def test_cargo_audit_vulnerabilities_and_warnings(self):
+        out = json.dumps({
+            "vulnerabilities": {"found": True, "count": 1, "list": [
+                {"advisory": {"id": "RUSTSEC-2024-0001", "title": "overflow"},
+                 "versions": {"patched": [">=1.2.3"]}, "package": {"name": "foo", "version": "1.2.0"}}]},
+            "warnings": {"unmaintained": [
+                {"kind": "unmaintained", "advisory": {"id": "RUSTSEC-2024-0002", "title": "gone"},
+                 "package": {"name": "bar", "version": "0.1.0"}}]}})
+        scan = advisories.parse_cargo_audit(out)
+        by = scan.by_name()
+        self.assertEqual((by["foo"].severity, by["foo"].fix_version), ("unknown", ">=1.2.3"))
+        self.assertEqual(by["bar"].severity, "info")
+        self.assertIn("unmaintained", by["bar"].advisories[0].title)
+
+
+class SyncTests(unittest.TestCase):
+    def test_one_unreachable_repo_does_not_stop_the_others(self):
+        os.environ.pop("PATCHLAB_INTERNAL_ESTATE_WORKDIR", None)
+        est = manifest.load(write_manifest(MINIMAL + '\n[[repo]]\nname = "other"\nurl = "https://github.com/Org/other"\n'))
+        calls = []
+
+        def fake_sync(url, dest):
+            calls.append(url)
+            if url.endswith("/app"):
+                raise gitops.GitError("could not read from remote")
+
+        real_sync, real_head = gitops.sync_mirror, gitops.head
+        gitops.sync_mirror, gitops.head = fake_sync, lambda m, b: "f" * 40
+        try:
+            heads, errors = pipeline.sync(est)
+        finally:
+            gitops.sync_mirror, gitops.head = real_sync, real_head
+        self.assertEqual(heads, {"other": "f" * 40})
+        self.assertEqual(list(errors), ["app"])
+        self.assertIn("https://github.com/Org/other", calls)
 
 
 class HealthAndDigestTests(unittest.TestCase):

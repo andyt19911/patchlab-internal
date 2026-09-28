@@ -11,7 +11,7 @@ from pathlib import Path
 from .. import report as engine_report
 from .. import runner
 from ..config import Patch
-from . import bridge, gitops, npm, state, triage
+from . import advisories, bridge, gitops, manifest, npm, state, triage
 from .manifest import Estate, Package
 
 
@@ -25,20 +25,30 @@ def mirror_path(estate: Estate, repo_name: str) -> Path:
     return estate.repos_dir / f"{repo_name}.git"
 
 
-def sync(estate: Estate, only: list[str] | None = None) -> dict[str, str]:
-    """Fetch every repo and private-dependency mirror. Returns repo -> head commit."""
-    heads = {}
+def sync(estate: Estate, only: list[str] | None = None) -> tuple[dict[str, str], dict[str, str]]:
+    """Fetch every repo and private-dependency mirror.
+
+    Returns (repo -> head commit, name -> error). One unreachable repo never
+    stops the others; a failed mirror fails every repo, because packages that
+    need it would install stale code."""
+    heads, errors = {}, {}
     for name, spec in estate.mirrors.items():
         log(f"mirror {name} <- {spec.url}")
-        gitops.sync_mirror(spec.url, estate.mirrors_dir / f"{name}.git")
+        try:
+            gitops.sync_mirror(spec.url, estate.mirrors_dir / f"{name}.git")
+        except gitops.GitError as e:
+            errors[f"mirror {name}"] = str(e)
     for repo in estate.repos:
         if only and repo.name not in only:
             continue
         log(f"repo {repo.name} <- {repo.url} ({repo.branch})")
         m = mirror_path(estate, repo.name)
-        gitops.sync_mirror(repo.url, m)
-        heads[repo.name] = gitops.head(m, repo.branch)
-    return heads
+        try:
+            gitops.sync_mirror(repo.url, m)
+            heads[repo.name] = gitops.head(m, repo.branch)
+        except gitops.GitError as e:
+            errors[repo.name] = str(e)
+    return heads, errors
 
 
 def resolve(estate: Estate, pkg: Package, commit: str | None) -> str:
@@ -56,15 +66,27 @@ def scan(estate: Estate, pkg: Package, commit: str | None = None) -> dict:
     sha = resolve(estate, pkg, commit)
     out = {"package": pkg.id, "commit": sha, "ecosystem": pkg.ecosystem,
            "scanned": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
-    if pkg.ecosystem != "npm":
+    if pkg.unsupported or pkg.ecosystem not in manifest.SCANNERS:
         out["error"] = f"no scanner for {pkg.ecosystem} yet; advisories not checked"
         return _save_scan(estate, pkg, out)
     checkout = gitops.checkout(mirror_path(estate, pkg.repo.name), sha, estate.workdir / "tmp")
     try:
         with bridge.toolbox(estate, pkg, bridge.new_id("scan"), checkout) as tb:
-            result = npm.audit(tb)
-        direct = npm.direct_dependencies(checkout / pkg.path / "package.json")
-        plans, blocked = npm.plan(result, set(direct), estate.ignore)
+            if pkg.ecosystem == "npm":
+                result = npm.audit(tb)
+            else:
+                result = advisories.scan(tb, pkg.ecosystem, pkg.install)
+        if pkg.ecosystem == "npm":
+            direct = npm.direct_dependencies(checkout / pkg.path / "package.json")
+            plans, blocked = npm.plan(result, set(direct), estate.ignore)
+        else:
+            # Reported, never proposed: there is no planner for this ecosystem yet.
+            plans = []
+            blocked = [npm.NotFixable(v.name, (f"fixed in {v.fix_version}; " if v.fix_version else
+                                               "no fixed version published; ")
+                                      + f"automatic fixes are npm-only, so this needs a person",
+                                      v.severity, v.advisories) for v in result.vulnerable]
+            out["production_known"] = False
         out.update(scan=result.to_dict(), plans=[p.to_dict() for p in plans],
                    not_fixable=[b.to_dict() for b in blocked], error=result.error)
     finally:

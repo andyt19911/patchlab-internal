@@ -43,10 +43,12 @@ def cmd_validate(args) -> int:
 def cmd_sync(args) -> int:
     est = _estate(args)
     with state.exclusive(est.state_dir):
-        heads = pipeline.sync(est, args.repo or None)
+        heads, errors = pipeline.sync(est, args.repo or None)
     for repo, sha in heads.items():
         print(f"{repo:<28} {sha}")
-    return 0
+    for name, err in errors.items():
+        print(f"{name:<28} FAILED: {err}", file=sys.stderr)
+    return 1 if errors else 0
 
 
 def cmd_scan(args) -> int:
@@ -111,16 +113,23 @@ def cmd_cycle(args) -> int:
     _need_docker()
     failures = 0
     with state.exclusive(est.state_dir):
-        pipeline.sync(est)
+        heads, errors = pipeline.sync(est)
+        for name, err in errors.items():
+            failures += 1
+            pipeline.log(f"sync {name} failed: {err}")
         for pkg in est.packages():
+            if pkg.repo.name not in heads:
+                # Never test a stale checkout as if it were current.
+                continue
             # One package failing to run never stops the others.
             for step in (["health"] if args.no_propose else ["health", "propose"]):
                 try:
                     if step == "health":
                         pipeline.health(est, pkg)
-                    elif pkg.ecosystem in manifest.PROPOSERS and not pkg.unsupported:
+                    elif pkg.ecosystem in manifest.SCANNERS and not pkg.unsupported:
                         pipeline.scan(est, pkg)
-                        pipeline.propose_and_test(est, pkg)
+                        if pkg.ecosystem in manifest.PROPOSERS:
+                            pipeline.propose_and_test(est, pkg)
                 except Exception as e:   # recorded in the digest via the missing state, and here
                     failures += 1
                     pipeline.log(f"{pkg.id}: {step} failed: {type(e).__name__}: {e}")

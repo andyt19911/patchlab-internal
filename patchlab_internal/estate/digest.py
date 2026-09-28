@@ -44,7 +44,7 @@ def render(estate: Estate, rows: list[dict] | None = None) -> str:
                 needs.append(f"{r['package'].id}: review the {d['key']} change ({d['decision']['verdict']})")
     L += ["## Needs a person", ""] + ([f"- {n}" for n in needs] or ["- Nothing today."]) + [""]
 
-    L += ["## Packages", "", "| Package | Health | Advisories (prod) | Proposals |", "|---|---|---|---|"]
+    L += ["## Packages", "", "| Package | Health | Advisories (in production code; ? = not known) | Proposals |", "|---|---|---|---|"]
     for r in rows:
         pkg, h, scan = r["package"], r["health"] or {}, r["scan"]
         if pkg.unsupported:
@@ -60,7 +60,13 @@ def render(estate: Estate, rows: list[dict] | None = None) -> str:
             adv = f"not scanned ({scan['error']})"
         elif scan:
             prod = [v for v in vul if v.get("production")]
-            adv = (f"{len(vul)} ({len(prod)})" if vul else "none") + f" at `{scan.get('commit', '')[:8]}`"
+            if not vul:
+                adv = "none"
+            elif scan.get("production_known") is False:
+                adv = f"{len(vul)} (?)"
+            else:
+                adv = f"{len(vul)} ({len(prod)})"
+            adv += f" at `{scan.get('commit', '')[:8]}`"
         else:
             adv = "not scanned yet"
         props = ", ".join(f"{ICON.get(d['decision']['verdict'], '')} {d['key']}" for d in r["decisions"]) or "—"

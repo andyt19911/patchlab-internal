@@ -314,6 +314,10 @@ gone, none introduced, only the manifest and lockfile changed. Read
 [docs/DESIGN.md](docs/DESIGN.md) for the lifecycle, the gate and what it can't
 guarantee, and [deploy/systemd](deploy/systemd) to run it nightly.
 
+Proposals are npm-only so far. Python, Go and Cargo packages are scanned
+(pip-audit, govulncheck, cargo audit) and their advisories reported for a
+person to fix; packages with no scanner say "not scanned", never "clean".
+
 ## CI integration
 
 See [`examples/ci/github-actions.yml`](examples/ci/github-actions.yml). It runs
