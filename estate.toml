@@ -1,0 +1,95 @@
+# The estate PatchLab Internal maintains. See docs/DESIGN.md §3.1.
+#
+# Every value here reaches a sandbox, so it may hold only throwaway test
+# values: `estate validate` refuses anything that looks like a real credential.
+# Host-specific settings come from the environment:
+#   PATCHLAB_INTERNAL_ESTATE_WORKDIR  where clones, mirrors and state live
+#   PATCHLAB_INTERNAL_CA_BUNDLE       a CA bundle to trust (TLS-inspecting proxies)
+
+[estate]
+workdir = "~/.local/share/patchlab-internal/estate"
+publish = "report-only"          # M4 turns on "draft-pr"
+
+# Private git dependencies. The host fetches them with its own credentials;
+# sandboxes get a read-only copy and never see a token.
+[[mirror]]
+name = "streamly-security-core"
+url  = "https://github.com/MIIMAGINELabs/streamly-security-core"
+
+# ---------------------------------------------------------------- subsovereign
+[[repo]]
+name   = "subsovereign"
+url    = "https://github.com/StreamlyApps/subsovereign"
+branch = "main"
+
+  [[repo.package]]
+  path      = "backend"
+  ecosystem = "npm"
+  # What the repo ships and its CI pins (Node 20; Node 18 crashes vitest).
+  # The full image, not -slim: it has git, which npm needs for the mirror.
+  image     = "node:20-bookworm"
+  install   = ["npm ci --no-audit --no-fund"]
+  mirrors   = ["streamly-security-core"]
+  check_network = "isolated"
+  memory    = "6g"
+  not_covered = [
+    "Real mail delivery: platform-relay.test.ts sends through an in-process SMTP sink, not the production relay.",
+    "The live AI path (ai-provider.test.ts skips itself without MERLYN_SECRET), as in the repo's own CI.",
+    "The sovereign-twin drift guard (twin-interview-parity.test.ts skips without the Rust crate checked out).",
+  ]
+  cpus      = "4"
+
+    # The same throwaway values as .github/workflows/backend.yml.
+    [repo.package.env]
+    CI               = "true"
+    NODE_ENV         = "test"
+    DATABASE_URL     = "postgresql://postgres:postgres@postgres:5432/postgres"
+    REDIS_URL        = "redis://redis:6379"
+    JWT_SECRET       = "ci-jwt-secret-for-tests-only-32-chars-min"
+    API_KEY_SALT     = "ci-api-key-salt-for-tests-only-32chars"
+    ENCRYPTION_KEY   = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    APPLE_BUNDLE_ID  = "test.bundle"
+
+    # global-setup.ts uses DROP DATABASE ... WITH (FORCE): Postgres 13 or newer.
+    [[repo.package.sidecars]]
+    name   = "postgres"
+    image  = "postgres:16"
+    env    = { POSTGRES_USER = "postgres", POSTGRES_PASSWORD = "postgres", POSTGRES_DB = "postgres" }
+    health = "pg_isready -U postgres"
+
+    [[repo.package.sidecars]]
+    name   = "redis"
+    image  = "redis:7"
+    health = "redis-cli ping"
+
+    [[repo.package.checks]]
+    name     = "typecheck"
+    run      = "npx tsc --noEmit"
+    category = "build"
+
+    # CI's "the spec must be reproducible from the registry" step.
+    [[repo.package.checks]]
+    name     = "openapi-reproducible"
+    run      = "npm run openapi >/dev/null && git diff --exit-code -- openapi.json; rc=$?; git checkout -- openapi.json; exit $rc"
+    category = "build"
+
+    # npm test runs this as `pretest`; run explicitly because the suites below call vitest directly.
+    [[repo.package.checks]]
+    name = "fixture-ids"
+    run  = "npm run check:fixtures"
+
+    [[repo.package.checks]]
+    name    = "unit-tests"
+    run     = "npx vitest run --exclude '**/audit-chain.test.ts' --reporter=default --reporter=junit --outputFile.junit=/tmp/unit.junit.xml"
+    results = "junit:/tmp/unit.junit.xml"
+    timeout = 2400
+
+    [[repo.package.checks]]
+    name    = "audit-chain"
+    run     = "npx vitest run src/__tests__/audit-chain.test.ts --reporter=default --reporter=junit --outputFile.junit=/tmp/chain.junit.xml"
+    results = "junit:/tmp/chain.junit.xml"
+
+  [[repo.package]]
+  path        = "sdk-ios"
+  ecosystem   = "swift"
+  unsupported = "needs a macOS runner (swift test / xcodebuild)"
