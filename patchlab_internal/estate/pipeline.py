@@ -318,6 +318,12 @@ def propose_and_test(estate: Estate, pkg: Package, plan_key: str | None = None,
         decision = triage.decide(first.report, prop, pkg.unsupported, confirm)
         state.write_json(out / "decision.json", decision.to_dict())
         (out / "pr.md").write_text(pr_body(pkg, prop, decision, first), encoding="utf-8")
+        if estate.repair and only_regressions_block(decision):
+            log(f"{pkg.id}: {plan.key} fixes its advisories but breaks tests; asking the repair agent "
+                "to adapt the code")
+            adapted = repair_upgrade(estate, pkg, sha, plan, prop, out, first)
+            if adapted:
+                results.append(adapted)
         log(f"{pkg.id}: {plan.key}: {decision.verdict}. {decision.summary}")
         results.append({"proposal": prop, "decision": decision.to_dict(), "dir": str(out),
                         "report": str(first.report_dir) if first.report_dir else None})
@@ -327,6 +333,50 @@ def propose_and_test(estate: Estate, pkg: Package, plan_key: str | None = None,
                 log(f"{pkg.id}: {extra.title} fixes what {plan.key} left; proposing it too")
                 queue.append(extra)
     return results
+
+
+def only_regressions_block(decision: triage.Decision) -> bool:
+    """BLOCKED by real regressions and nothing else: the case code changes can fix."""
+    blockers = [g for g in decision.gate if not g.ok and g.kind == "blocker"]
+    return (decision.verdict == triage.BLOCKED and bool(blockers)
+            and all(g.name == "no regressions" for g in blockers))
+
+
+def repair_upgrade(estate: Estate, pkg: Package, sha: str, plan: npm.Plan, prop: dict, out: Path,
+                   first: "TestOutcome") -> dict | None:
+    """An upgrade that fixes advisories but breaks tests: the agent adapts the code
+    to it, and upgrade plus adaptation go through the gate together."""
+    broken = triage.regressions(first.report)
+    targets = [b for b in broken if not b.endswith("passed before, fails after")]
+    targets += [b.split(":", 1)[0] for b in broken if b.endswith("passed before, fails after")]
+    rdir = out / "adapted"
+    excerpts = repair.excerpts_from(first.report_dir, targets, "after") if first.report_dir else {}
+    brief = repair.write_upgrade_brief(pkg, sha, prop, targets, excerpts)
+    try:
+        agent = repair.run_agent(estate, pkg, sha, brief, rdir, base_patch=out / "change.patch")
+    except RuntimeError as e:
+        log(f"{pkg.id}: repair agent could not run: {e}")
+        return None
+    if not agent["agent_changed_files"]:
+        log(f"{pkg.id}: the repair agent changed nothing")
+        return None
+    adapted = {**prop, **agent, "repaired_by_agent": True, "broken_by_upgrade": targets,
+               "notes": prop.get("notes", []) + agent.get("notes", [])}
+    adapted["diffstat"] = gitops.diff_stat(rdir / "change.patch")
+    adapted["unexpected_files"] = []      # code changes are the point; the agent-only checks judge them
+    state.write_json(rdir / "proposal.json", adapted)
+    run_id = bridge.new_id("proposal")
+    label = f"{plan.dependency} -> {prop.get('version')} with code adapted"
+    outcome = test_change(estate, pkg, sha, rdir / "change.patch", label, rdir / "runs", run_id + "-1")
+    confirm = None
+    if outcome.report and triage.regressions(outcome.report):
+        confirm = test_change(estate, pkg, sha, rdir / "change.patch", label, rdir / "runs", run_id + "-2").report
+    decision = triage.decide(outcome.report, adapted, pkg.unsupported, confirm)
+    state.write_json(rdir / "decision.json", decision.to_dict())
+    (rdir / "pr.md").write_text(pr_body(pkg, adapted, decision, outcome), encoding="utf-8")
+    log(f"{pkg.id}: {plan.key} with adapted code: {decision.verdict}. {decision.summary}")
+    return {"proposal": adapted, "decision": decision.to_dict(), "dir": str(rdir),
+            "report": str(outcome.report_dir) if outcome.report_dir else None}
 
 
 def follow_up_plans(estate: Estate, pkg: Package, sha: str, prop: dict) -> list[npm.Plan]:

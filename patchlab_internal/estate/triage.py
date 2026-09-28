@@ -132,6 +132,10 @@ def gate_for(report: dict | None, proposal: dict, unsupported: str | None = None
         g.append(GateItem("partial fix", False, f"{len(deferred)} advisory(ies) need a breaking change "
                           "and are left for a person", deferred, kind="review"))
 
+    if proposal.get("repaired_by_agent"):
+        g += [item for item in _repair_items(report, {**proposal, "targets": []})
+              if item.name != "targets fixed"]
+
     # 7. The change is only what it claims to be.
     stray = proposal.get("unexpected_files", [])
     g.append(GateItem("change scope", not stray, "only the manifest and lockfile changed" if not stray

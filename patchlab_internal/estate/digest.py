@@ -25,6 +25,10 @@ def collect(estate: Estate) -> list[dict]:
                 continue
             for key in sorted(p.name for p in props.iterdir() if p.is_dir()):
                 run, d = state.latest(props / key, "decision.json")
+                # An upgrade the repair agent adapted the code to supersedes the blocked one.
+                if run and (run / "adapted" / "decision.json").is_file():
+                    run = run / "adapted"
+                    d = state.read_json(run / "decision.json")
                 if d:
                     prop = state.read_json(run / "proposal.json") or {}
                     decisions.append({"key": prefix + key, "run": str(run), "decision": d, "proposal": prop})

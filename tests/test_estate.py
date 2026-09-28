@@ -425,6 +425,24 @@ class RepairTests(unittest.TestCase):
         touched = dict(prop, test_files_changed=["src/__tests__/a.test.ts"])
         self.assertEqual(triage.decide(rep, touched).verdict, triage.REVIEW)
 
+    def test_blocked_upgrade_goes_to_repair_only_when_regressions_are_all_that_block(self):
+        broken = report([check("tests", "ok", case_regressions=["a"])], "FAIL")
+        d = triage.decide(broken, GOOD_PROPOSAL, confirm=broken)
+        self.assertTrue(pipeline.only_regressions_block(d))
+        still_vulnerable = dict(GOOD_PROPOSAL, remaining_advisories=["1"])
+        self.assertFalse(pipeline.only_regressions_block(triage.decide(broken, still_vulnerable, confirm=broken)))
+        self.assertFalse(pipeline.only_regressions_block(triage.decide(report([check("tests", "ok")]),
+                                                                      GOOD_PROPOSAL)))
+
+    def test_an_adapted_upgrade_is_judged_on_the_agents_own_edits(self):
+        adapted = dict(GOOD_PROPOSAL, repaired_by_agent=True, test_files_changed=[],
+                       dependency_files_changed=[])
+        self.assertEqual(triage.decide(report([check("tests", "ok")]), adapted).verdict, triage.READY)
+        touched = dict(adapted, test_files_changed=["src/__tests__/mail.test.ts"])
+        self.assertEqual(triage.decide(report([check("tests", "ok")]), touched).verdict, triage.REVIEW)
+        relocked = dict(adapted, dependency_files_changed=["backend/package-lock.json"])
+        self.assertEqual(triage.decide(report([check("tests", "ok")]), relocked).verdict, triage.REVIEW)
+
     def test_repair_agent_config_names_credentials_only(self):
         base = MINIMAL + '\n[repair]\nimage = "node:22"\ncommand = "claude -p x"\nenv = ["ANTHROPIC_API_KEY"]\n'
         est = manifest.load(write_manifest(base))

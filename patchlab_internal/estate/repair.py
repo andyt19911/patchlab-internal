@@ -51,15 +51,18 @@ def latest_failures(estate: Estate, pkg: Package, sha: str) -> tuple[list[str], 
 
 def failure_excerpts(health: dict, targets: list[str], lines: int = 40) -> dict[str, str]:
     """For each target test, the lines of its check's log around its name (or the log's tail)."""
+    return excerpts_from(Path(health.get("report") or ""), targets, "before", lines)
+
+
+def excerpts_from(report_dir: Path, targets: list[str], phase: str, lines: int = 40) -> dict[str, str]:
     out: dict[str, str] = {}
-    report_dir = Path(health.get("report") or "")
     rep = state.read_json(report_dir / "report.json") or {}
     t = triage._target(rep) or {}
     checks = {c["name"]: c for c in t.get("checks", [])}
     for target in targets:
         check_name, _, case = target.partition(": ")
         c = checks.get(check_name, {})
-        before = c.get("before") or {}
+        before = c.get(phase) or {}
         text = ""
         log = before.get("log_file")
         if log and (report_dir / log).is_file():
@@ -113,8 +116,34 @@ def write_brief(pkg: Package, sha: str, targets: list[str], excerpts: dict[str, 
     return "\n".join(L)
 
 
-def run_agent(estate: Estate, pkg: Package, sha: str, brief: str, out: Path) -> dict:
-    """Run the agent on a fresh checkout; returns what it changed."""
+def write_upgrade_brief(pkg: Package, sha: str, prop: dict, broken: list[str], excerpts: dict[str, str]) -> str:
+    """The brief for an upgrade that fixes advisories but breaks tests: keep the
+    upgrade, adapt the code to it."""
+    plan = prop.get("plan", {})
+    what = f"{plan.get('dependency')} to {prop.get('version')}" if plan.get("dependency") else plan.get("title")
+    L = [f"# Adapt {pkg.id} to the security upgrade of {what}", "",
+         f"Repository {pkg.repo.url}, commit {sha[:12]}, with the upgrade already applied and committed "
+         "(the last commit). It fixes: " + ", ".join(a["id"] for a in plan.get("advisories", [])) + ".", "",
+         "With the upgrade, these tests fail; before it, they passed:", ""]
+    for t in broken:
+        L += [f"### {t}", ""] + (["```", excerpts[t][-6000:], "```", ""] if excerpts.get(t) else [])
+    L += ["## Rules", "",
+          "- Keep the upgrade. Do not revert or pin back the dependency, and do not edit the lockfile.",
+          "- Change the code that uses the dependency so it works with the new version (read the "
+          "dependency's changelog or migration guide in node_modules / site-packages if it is there).",
+          "- Never skip, delete, weaken or loosen a test. A change to any test file is shown to a person.",
+          "- Change as little as possible. Do not commit; the change is taken from the working tree.",
+          "- PatchLab runs the full suite after you finish, before and after, and rolls back to check.", ""]
+    return "\n".join(L)
+
+
+def run_agent(estate: Estate, pkg: Package, sha: str, brief: str, out: Path,
+              base_patch: Path | None = None) -> dict:
+    """Run the agent on a fresh checkout (with ``base_patch`` applied first, for
+    an upgrade the agent must adapt the code to); returns what changed.
+
+    ``change.patch`` is everything against ``sha``, base patch included; the
+    test and dependency-file checks look only at what the agent itself changed."""
     agent = estate.repair
     missing = [n for n in agent.env if not os.environ.get(n)]
     if missing:
@@ -128,6 +157,14 @@ def run_agent(estate: Estate, pkg: Package, sha: str, brief: str, out: Path) -> 
                             setup=agent.setup, extra_env={n: None for n in agent.env}) as tb:
             tb.box.copy_in(out / "brief.md", BRIEF_PATH)
             root = bridge.repo_root(pkg)
+            git = f"git -C {root} -c user.name=patchlab -c user.email=patchlab@localhost"
+            if base_patch is not None:
+                tb.box.copy_in(base_patch, "/tmp/base.patch")
+                applied = tb.run(f"{git} apply --index /tmp/base.patch && {git} commit -qm base", timeout=120,
+                                 workdir="/")
+                if not applied.ok:
+                    raise RuntimeError("the upgrade did not apply: " + applied.output.strip()[-300:])
+            tb.run(f"{git} rev-parse HEAD > /tmp/base.sha", timeout=60, workdir="/")
             started = dt.datetime.now()
             res = tb.run(f"cd {shlex.quote(root)} && {agent.command}", timeout=agent.timeout, workdir="/")
             result["agent_exit"] = res.exit_code
@@ -136,18 +173,23 @@ def run_agent(estate: Estate, pkg: Package, sha: str, brief: str, out: Path) -> 
             (out / "agent.log").write_text(res.output[-200_000:], encoding="utf-8")
             if not res.ok:
                 result["notes"].append("the agent exited with an error; its output is in agent.log")
-            # Anything the agent committed is folded back into the working tree diff.
-            tb.run(f"git -C {root} reset --soft {sha} 2>/dev/null; git -C {root} add -A && "
-                   f"git -C {root} diff --cached --binary {sha} > /tmp/change.patch && "
-                   f"git -C {root} diff --cached --name-only {sha} > /tmp/changed.txt", timeout=120, workdir="/")
-            tb.copy_out("/tmp/change.patch", out / "change.patch")
-            tb.copy_out("/tmp/changed.txt", out / "changed.txt")
+            # The index against a commit covers whatever the agent committed too.
+            tb.run(f"{git} add -A && {git} diff --cached --binary {sha} > /tmp/change.patch && "
+                   f"{git} diff --cached --name-only {sha} > /tmp/changed.txt && "
+                   f"{git} diff --cached --name-only $(cat /tmp/base.sha) > /tmp/agent-changed.txt",
+                   timeout=120, workdir="/")
+            for name in ("change.patch", "changed.txt", "agent-changed.txt"):
+                tb.copy_out(f"/tmp/{name}", out / name)
     finally:
         gitops.remove_checkout(checkout)
-    changed = [x for x in (out / "changed.txt").read_text().split() if x] if (out / "changed.txt").is_file() else []
+
+    def names(f: str) -> list[str]:
+        return [x for x in (out / f).read_text().split() if x] if (out / f).is_file() else []
+    changed, by_agent = names("changed.txt"), names("agent-changed.txt")
     result["changed_files"] = changed
-    result["test_files_changed"] = [c for c in changed if TEST_PATH.search(c)]
-    result["dependency_files_changed"] = [c for c in changed if DEP_MANIFEST.search(c)]
+    result["agent_changed_files"] = by_agent
+    result["test_files_changed"] = [c for c in by_agent if TEST_PATH.search(c)]
+    result["dependency_files_changed"] = [c for c in by_agent if DEP_MANIFEST.search(c)]
     result["diffstat"] = gitops.diff_stat(out / "change.patch") if changed else []
     return result
 
