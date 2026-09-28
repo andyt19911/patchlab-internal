@@ -40,7 +40,7 @@ class ParseTests(unittest.TestCase):
     def test_bandit_demotes_low_confidence_high(self):
         fs = sast.parse_bandit(json.dumps(BANDIT), "/src/app")
         self.assertEqual([(f.rule, f.severity, f.code) for f in fs],
-                         [("B602", "high", "subprocess.call(c, shell=True)"), ("B105", "medium", "p = 'x'")])
+                         [("B602", "high", "subprocess.call(c, shell=True)"), ("B105", "medium", "")])
         self.assertEqual(fs[0].cwe, "CWE-78")
 
     def test_gosec(self):

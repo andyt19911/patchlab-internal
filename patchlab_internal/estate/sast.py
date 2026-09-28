@@ -47,6 +47,9 @@ GOSEC = "github.com/securego/gosec/v2/cmd/gosec@v2.29.0"
 TEST_CODE = re.compile(r"(^|/)(__tests__|tests?|spec|testdata|fixtures?|e2e)/|\.(test|spec)\.[cm]?[jt]sx?$|"
                        r"(^|/)test_[^/]*\.py$|_test\.(py|go)$|(^|/)conftest\.py$")
 EXCLUDE_DIRS = ("node_modules", ".venv", "venv", "dist", "build", ".git", "vendor", "target", ".next")
+# Rules about hard-coded credentials: their flagged line can hold the value, so it is never
+# kept (the fingerprint then falls back to the line number).
+CREDENTIAL_RULES = {"B105", "B106", "B107", "G101"}
 # Comments that silence a scanner. An agent adding one has hidden a finding, not fixed it.
 SUPPRESSION = re.compile(r"#\s*nosec|//\s*#?nosec|nosemgrep|noopengrep|eslint-disable|noqa:\s*S\d|"
                          r"@SuppressWarnings|#\s*type:\s*ignore", re.I)
@@ -130,7 +133,7 @@ def parse_bandit(text: str, prefix: str) -> list[Finding]:
         if sev == "high" and r.get("issue_confidence") == "LOW":
             sev = "medium"
         out.append(Finding("bandit", r["test_id"], _rel(r["filename"], prefix), int(r["line_number"]), sev,
-                           r["issue_text"], code, f"CWE-{(r.get('issue_cwe') or {}).get('id', '')}".rstrip("-")))
+                           r["issue_text"], "" if r["test_id"] in CREDENTIAL_RULES else code, f"CWE-{(r.get('issue_cwe') or {}).get('id', '')}".rstrip("-")))
     return out
 
 
@@ -143,7 +146,7 @@ def parse_gosec(text: str, prefix: str) -> list[Finding]:
             sev = "medium"
         line = str(r.get("line", "0")).split("-")[0]
         out.append(Finding("gosec", r["rule_id"], _rel(r["file"], prefix), int(line), sev, r["details"],
-                           r.get("code", ""), f"CWE-{(r.get('cwe') or {}).get('id', '')}".rstrip("-")))
+                           "" if r["rule_id"] in CREDENTIAL_RULES else r.get("code", ""), f"CWE-{(r.get('cwe') or {}).get('id', '')}".rstrip("-")))
     return out
 
 

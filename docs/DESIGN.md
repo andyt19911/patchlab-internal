@@ -609,6 +609,16 @@ fixes, the browser smoke check, and repair of failing tests by a coding agent
 | caer admin-console, react-router 6 → 7 | found from the partial fix; 7.18.4; smoke 10/10 after | REVIEW (adds `cookie`, `set-cookie-parser`) |
 | subsovereign CORS preflight test | repair brief, scripted stand-in agent, full suite | REVIEW (the fix edits a test file) |
 
+Images, code and CI, run on 2026-09-28 at the same commits:
+
+| Case | What PatchLab did | Verdict |
+|---|---|---|
+| 8 Dockerfiles scanned | 6 on end-of-life runtimes (node 20 ×5, alpine 3.20) | — |
+| subsovereign backend, node 20 → 24 | full suite on node:20 and node:24: 1,338 passing on both, the same 2 pre-existing failures; fixable high/critical in the base 24 → 4 | REVIEW (the image doesn't build on this runner either way) |
+| caer jscpd and opengrep images, sentinel dashboard | moved and re-scanned; no package's checks exercise them | REVIEW |
+| code scan, 11 packages | complete for every package; 4 blocking findings: gosec G115 on a line that is itself a bounds check, G402 `InsecureSkipVerify` in the TLS probe (deliberate: a scanner must reach hosts with bad certificates), a placeholder `ENCRYPTION_KEY` in `.env.example`, and `new Function('s', 'return import(s)')` for an ESM import | all four read as false positives; the agent's false-positive path puts each to a person |
+| CI workflows, 5 repos | 41 actions pinned to their tags' commits in 4 repos (streamly-security-core already pins) | READY ×4 |
+
 The repair run used a **scripted stand-in** for the agent, because the runner
 has no agent credential yet: it proves the brief, the capture, the full-suite
 test and the gate, not an agent's judgement. The gate would BLOCK a change
