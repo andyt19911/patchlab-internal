@@ -16,6 +16,11 @@ if TYPE_CHECKING:
     from .runner import TargetRun
 
 PATCH_DIR = "/tmp/patchlab"
+MIRROR_DIR = "/opt/patchlab/mirrors"
+CA_PATH = "/usr/local/share/patchlab/ca-bundle.crt"
+# Every tool that reads its own CA setting, pointed at the same bundle.
+CA_ENV = ("SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO", "REQUESTS_CA_BUNDLE",
+          "PIP_CERT", "CARGO_HTTP_CAINFO", "CURL_CA_BUNDLE")
 
 # Prints "@@REBOOT <reason>" when the patched system needs a reboot to take effect.
 REBOOT_REQUIRED = r"""
@@ -84,6 +89,34 @@ done"""
     return None
 
 
+def mirror_dest(index: int, mirror) -> str:
+    return f"{MIRROR_DIR}/{index + 1:02d}-{mirror.path.name}"
+
+
+def sandbox_env(sb) -> dict[str, str]:
+    """The container environment: the config's env, the CA settings and git's
+    insteadOf rules for mirrors (GIT_CONFIG_COUNT needs git 2.31 or newer)."""
+    env = dict(sb.env)
+    if sb.ca_bundle:
+        for k in CA_ENV:
+            env.setdefault(k, CA_PATH)
+    pairs = []
+    for i, m in enumerate(sb.mirrors):
+        for url in m.urls:
+            pairs.append((f"url.file://{mirror_dest(i, m)}.insteadOf", url))
+    if pairs:
+        pairs.append(("safe.directory", "*"))
+        env["GIT_CONFIG_COUNT"] = str(len(pairs))
+        for n, (k, v) in enumerate(pairs):
+            env[f"GIT_CONFIG_KEY_{n}"] = k
+            env[f"GIT_CONFIG_VALUE_{n}"] = v
+    return env
+
+
+# leftovers() marks networks with this prefix so remove() can tell them from containers.
+NET = "network:"
+
+
 class LinuxPlatform:
     name = "linux"
 
@@ -100,16 +133,31 @@ class LinuxPlatform:
             return
         from .runner import StageFailed
         sb, r = self.cfg.sandbox, tr.result
+        env = sandbox_env(sb)
+        private = bool(sb.sidecars) or sb.check_network == "isolated"
         with tr.stage("provision") as st:
-            tag = sandbox.cache_tag(tr.image, sb.setup, sb.env)
+            tag = sandbox.cache_tag(tr.image, sb.setup, env)
             use_cache = sb.cache and tr.opts.use_cache and bool(sb.setup)
             r.cache_hit = use_cache and sandbox.image_exists(tag)
+            name = tr.sandbox_name(120)
             tr.box = DockerSandbox(
-                tag if r.cache_hit else tr.image, tr.run_id,
-                tr.sandbox_name(120),
-                memory=sb.memory, cpus=sb.cpus, pids=sb.pids, network=sb.network, env=sb.env)
+                tag if r.cache_hit else tr.image, tr.run_id, name,
+                memory=sb.memory, cpus=sb.cpus, pids=sb.pids,
+                network=name + "-net" if private and sb.network == "none" else sb.network,
+                env=env)
+            if private:
+                # Created before the sandbox so a failure here still tears down cleanly.
+                tr.box.private_network = sandbox.create_network(name + "-net", tr.run_id)
             tr.box.start()
+            if private and tr.box.network != tr.box.private_network:
+                tr.box.connect(tr.box.private_network)
+            if sb.ca_bundle:
+                tr.box.exec(f"mkdir -p {shlex.quote(CA_PATH.rsplit('/', 1)[0])}", timeout=30)
+                tr.box.copy_in(sb.ca_bundle, CA_PATH)
             st.detail = f"container {tr.box.name}" + (" (from setup cache)" if r.cache_hit else "")
+
+        if sb.sidecars:
+            self._start_sidecars(tr)
 
         if not r.cache_hit and sb.setup:
             with tr.stage("setup") as st:
@@ -123,6 +171,51 @@ class LinuxPlatform:
                 if use_cache:
                     tr.box.commit(tag)
                     st.detail = f"cached as {tag}"
+
+    def _start_sidecars(self, tr: "TargetRun") -> None:
+        from .runner import StageFailed
+        box = tr.box
+        with tr.stage("sidecars") as st:
+            for sc in self.cfg.sandbox.sidecars:
+                cname = f"{box.name}-{sc.name}"
+                box.sidecars.append(cname)
+                sandbox.start_sidecar(sc.image, tr.run_id, cname, sc.name, box.private_network, sc.env)
+            for sc in self.cfg.sandbox.sidecars:
+                cname = f"{box.name}-{sc.name}"
+                if sc.health and not sandbox.wait_healthy(cname, sc.health, sc.health_timeout):
+                    raise StageFailed(f"sidecar '{sc.name}' ({sc.image}) did not become healthy "
+                                      f"within {sc.health_timeout}s",
+                                      sandbox.container_logs(cname).strip().splitlines()[-10:])
+            st.detail = ", ".join(f"{sc.name} ({sc.image})" for sc in self.cfg.sandbox.sidecars)
+
+    def deploy_extras(self, tr: "TargetRun") -> None:
+        """Copy git mirrors in. After setup, so a cached setup image never holds stale mirrors."""
+        for i, m in enumerate(self.cfg.sandbox.mirrors):
+            tr.box.copy_in(m.path, mirror_dest(i, m))
+
+    def install(self, tr: "TargetRun", when: str) -> list[str] | None:
+        """Run [sandbox].install. Returns None on success, else the output tail.
+
+        With check_network = "isolated" the sandbox is on the outside network
+        only while installing; checks never are."""
+        sb, box = self.cfg.sandbox, tr.box
+        isolated = sb.check_network == "isolated" and box.private_network and box.network != box.private_network
+        if not sb.install:
+            if isolated and when == "deploy":
+                box.disconnect(box.network)
+            return None
+        if isolated and when != "deploy":
+            box.connect(box.network)
+        try:
+            for i, cmd in enumerate(sb.install):
+                res = box.exec(cmd, timeout=sb.install_timeout, workdir=sb.workdir)
+                tr.write_log(f"install-{when}/{i + 1:02d}.log", res, f"$ {cmd}\n")
+                if not res.ok:
+                    return [f"$ {cmd}", *res.output.strip().splitlines()[-12:]]
+        finally:
+            if isolated:
+                box.disconnect(box.network)
+        return None
 
     def _provision_cloud(self, tr: "TargetRun") -> None:
         from .runner import StageFailed
@@ -183,6 +276,14 @@ class LinuxPlatform:
                 tr.result.findings.append(Finding("fail", "patch", "the patch failed to install/apply",
                                                   res.output.strip().splitlines()[-15:]))
                 return False
+        if self.cfg.sandbox.install and not self.cloud:
+            with tr.stage("install-patched") as st:
+                tail = self.install(tr, "patched")
+                if tail:
+                    st.status, st.detail = "failed", "dependencies did not install after the patch"
+                    tr.result.findings.append(Finding(
+                        "fail", "install", "dependencies failed to install after the patch", tail))
+                    return False
         self._reboot_cycle(tr)
         return True
 
@@ -197,6 +298,12 @@ class LinuxPlatform:
             tr.result.findings.append(Finding("fail", "rollback", "the rollback procedure failed",
                                               res.output.strip().splitlines()[-15:]))
             return False
+        if self.cfg.sandbox.install and not self.cloud:
+            tail = self.install(tr, "rollback")
+            if tail:
+                tr.result.findings.append(Finding(
+                    "fail", "rollback", "dependencies failed to reinstall after the rollback", tail))
+                return False
         self._reboot_cycle(tr)
         return True
 
@@ -217,13 +324,19 @@ class LinuxPlatform:
                 (f" and {len(images)} cached image(s)" if include_cache else ""))
 
     def leftovers(self, run_id: str) -> list[str]:
-        return self.cloud.leftovers(run_id) if self.cloud else sandbox.run_containers(run_id)
+        if self.cloud:
+            return self.cloud.leftovers(run_id)
+        return sandbox.run_containers(run_id) + [NET + n for n in sandbox.run_networks(run_id)]
 
     def remove(self, names: list[str]) -> None:
         if self.cloud:
             self.cloud.remove(names)
-        else:
-            sandbox.remove_containers(names)
+            return
+        # Containers first: Docker refuses to remove a network that is still in use.
+        sandbox.remove_containers([n for n in names if not n.startswith(NET)])
+        for n in names:
+            if n.startswith(NET):
+                sandbox.remove_network(n[len(NET):])
 
     def available(self) -> str | None:
         return self.cloud.available() if self.cloud else sandbox.docker_available()

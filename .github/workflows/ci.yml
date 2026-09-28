@@ -115,10 +115,16 @@ jobs:
           if [ "$code" -ne 1 ]; then echo "expected exit 1 (FAIL), got $code"; exit 1; fi
       - name: Pending OS updates are tested
         run: python -m patchlab_internal run examples/urlkit/patchlab.toml --image ubuntu:24.04 --patch os-packages --out reports
-      - name: No sandboxes left behind
+      - name: Sidecars, reinstall after patch and rollback, isolated checks
+        run: python -m patchlab_internal run examples/services/patchlab.toml --verify-rollback --out reports
+      - name: Baseline-only (health) run
+        run: python -m patchlab_internal run examples/services/patchlab.toml --no-patch --out reports
+      - name: No sandboxes, sidecars or networks left behind
         run: |
           left=$(docker ps -aq --filter label=patchlab_internal=1)
           if [ -n "$left" ]; then docker ps -a --filter label=patchlab_internal=1; exit 1; fi
+          nets=$(docker network ls -q --filter label=patchlab_internal=1)
+          if [ -n "$nets" ]; then docker network ls --filter label=patchlab_internal=1; exit 1; fi
       - name: Reports in the job summary
         if: always()
         run: cat reports/*/report.md >> "$GITHUB_STEP_SUMMARY" || true
@@ -128,6 +134,18 @@ jobs:
           name: e2e-reports
           path: reports/
           retention-days: 14
+
+  estate:
+    name: Estate manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: estate.toml is valid and holds no credentials
+        run: python -m patchlab_internal estate -m estate.toml validate
 
   package:
     name: Build and install the packages
@@ -161,6 +179,6 @@ jobs:
           /tmp/full/bin/patchlab-internal setup --web --port 8766 --reports-dir "$PWD/reports" --configs-dir "$PWD/examples"
           /tmp/full/bin/patchlab-internal web & pid=$!
           for i in $(seq 1 20); do curl -fs http://127.0.0.1:8766/static/app.js >/dev/null && break; sleep 1; done
-          curl -fs -H "Authorization: Bearer ci-token" http://127.0.0.1:8766/api/configs | python -c "import json,sys; c=json.load(sys.stdin)['configs']; print(len(c), 'configs'); assert len(c) >= 8"
+          curl -fs -H "Authorization: Bearer ci-token" http://127.0.0.1:8766/api/configs | python -c "import json,sys; c=json.load(sys.stdin)['configs']; print(len(c), 'configs'); assert len(c) >= 9"
           # Background jobs in a non-interactive shell ignore SIGINT, so stop it with SIGTERM.
           kill $pid; wait $pid || true

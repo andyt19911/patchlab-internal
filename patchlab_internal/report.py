@@ -50,6 +50,10 @@ def _pkg_summary(t: TargetResult) -> str:
     return ", ".join(x for x in parts if x) or "none"
 
 
+def patch_label(r: RunReport) -> str:
+    return r.patch.label if r.patch else "Baseline only (no patch applied)"
+
+
 def _sorted_findings(t: TargetResult):
     return sorted(t.findings, key=lambda f: SEV_ORDER[f.severity])
 
@@ -60,9 +64,11 @@ def markdown(r: RunReport) -> str:
     d = r.to_dict()
     L = [f"# Patch test report: {r.config.name}", "",
          f"**Verdict: {ICON[r.verdict]} {r.verdict}**", "",
-         f"- **Patch:** {r.patch.label}",
+         f"- **Patch:** {patch_label(r)}",
          f"- **Run:** `{r.run_id}` — started {d['started']}, took {d['duration']}s",
-         f"- **Targets:** {len(r.targets)} · **Cleanup:** {r.cleanup}", ""]
+         f"- **Targets:** {len(r.targets)} · **Cleanup:** {r.cleanup}"]
+    L += [f"- **{k.replace('_', ' ').capitalize()}:** `{v}`" for k, v in r.config.metadata.items()]
+    L.append("")
     if r.cancelled:
         L += ["> Run was cancelled before completion; results are partial.", ""]
     L += ["| Target | OS | Verdict | Checks passing (before → after) | Packages changed | Time |",
@@ -168,12 +174,14 @@ def render_html(r: RunReport) -> str:
            f"<title>Patch Test Report</title><style>{CSS}</style></head><body><main>"]
     out.append("<div class='panel'><div class='hero'>"
                f"<span class='badge big {r.verdict}'>{ICON[r.verdict]} {r.verdict}</span>"
-               f"<div><h1>{_e(r.config.name)}</h1><div class='muted'>{_e(r.patch.label)}</div></div></div>"
+               f"<div><h1>{_e(r.config.name)}</h1><div class='muted'>{_e(patch_label(r))}</div></div></div>"
                "<div class='meta'>"
                f"<div><span>Run</span><code>{_e(r.run_id)}</code></div>"
                f"<div><span>Started</span>{_e(d['started'])}</div>"
                f"<div><span>Duration</span>{_e(d['duration'])}s</div>"
-               f"<div><span>Cleanup</span>{_e(r.cleanup)}</div></div>")
+               f"<div><span>Cleanup</span>{_e(r.cleanup)}</div>" +
+               "".join(f"<div><span>{_e(k.replace('_', ' '))}</span><code>{_e(v)}</code></div>"
+                       for k, v in r.config.metadata.items()) + "</div>")
     if r.cancelled:
         out.append("<p class='finding error'>Run was cancelled; results are partial.</p>")
     out.append("<h3>Targets</h3><div class='scroll'><table><tr><th>Target</th><th>OS</th><th>Verdict</th>"

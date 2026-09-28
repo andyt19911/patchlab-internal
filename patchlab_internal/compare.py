@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from .config import Check
 from .probes import Snapshot
-from .results import FAIL, PASS
+from .results import FAIL, PASS, SKIP
 
 # Windows events that always mean trouble when they first appear after a patch.
 CRITICAL_EVENTS = {
@@ -72,6 +72,8 @@ class CheckDelta:
     case_fixes: list[str] = field(default_factory=list)
     case_still_failing: list[str] = field(default_factory=list)
     case_new: list[str] = field(default_factory=list)
+    # Passed before, skipped after: a test that stopped running proves nothing.
+    case_now_skipped: list[str] = field(default_factory=list)
     slowdown: float | None = None
 
     def to_dict(self) -> dict:
@@ -82,6 +84,7 @@ class CheckDelta:
             "after": self.after.to_dict() if self.after else None,
             "case_regressions": self.case_regressions, "case_fixes": self.case_fixes,
             "case_still_failing": self.case_still_failing, "case_new": self.case_new,
+            "case_now_skipped": self.case_now_skipped,
             "slowdown": self.slowdown,
         }
 
@@ -126,6 +129,8 @@ def compare_checks(checks: list[Check], before: dict[str, CheckResult],
                 d.case_fixes.append(case)
             elif status == FAIL and prev == FAIL:
                 d.case_still_failing.append(case)
+            elif status == SKIP and prev == PASS:
+                d.case_now_skipped.append(case)
             elif prev is None:
                 d.case_new.append(case)
         # A test that passed before and has vanished is as bad as a failure:
@@ -151,6 +156,10 @@ def compare_checks(checks: list[Check], before: dict[str, CheckResult],
             findings.append(Finding("warn", "checks", f"'{check.name}' was already failing "
                                     "before the patch (pre-existing, not caused by it)",
                                     d.case_still_failing))
+        if d.case_now_skipped:
+            findings.append(Finding("warn", "checks", f"'{check.name}': "
+                                    f"{len(d.case_now_skipped)} test(s) that passed before the "
+                                    "patch are skipped after it", d.case_now_skipped))
         if d.case_fixes:
             n = len(d.case_fixes)
             findings.append(Finding("info", "checks", f"'{check.name}': the patch fixed "

@@ -41,6 +41,9 @@ class Options:
     jobs: int | None = None
     quiet: bool = False
     run_id: str | None = None
+    # Baseline only: run the checks once on the code as it is, with no patch
+    # (scheduled build-health runs).
+    no_patch: bool = False
 
 
 @dataclass
@@ -109,7 +112,7 @@ class TargetResult:
 class RunReport:
     run_id: str
     config: Config
-    patch: Patch
+    patch: Patch | None
     started: dt.datetime
     finished: dt.datetime | None = None
     targets: list[TargetResult] = field(default_factory=list)
@@ -125,15 +128,17 @@ class RunReport:
 
     def to_dict(self) -> dict:
         p = self.patch
+        patch = ({"kind": p.kind, "label": p.label, "files": [f.name for f in p.files],
+                  "packages": p.packages, "rollback": p.rollback or None} if p else None)
         return {
             "tool": f"patchlab_internal {__version__}", "run_id": self.run_id, "name": self.config.name,
+            "metadata": self.config.metadata,
             "verdict": self.verdict, "cancelled": self.cancelled,
             "started": self.started.isoformat(timespec="seconds"),
             "finished": self.finished.isoformat(timespec="seconds") if self.finished else None,
             "duration": round((self.finished - self.started).total_seconds(), 1) if self.finished else None,
             "platform": self.config.sandbox.platform, "provider": self.config.sandbox.provider,
-            "patch": {"kind": p.kind, "label": p.label, "files": [f.name for f in p.files],
-                      "packages": p.packages, "rollback": p.rollback or None},
+            "patch": patch, "mode": "baseline" if p is None else "patch",
             "cleanup": self.cleanup,
             "targets": [t.to_dict() for t in self.targets],
         }
@@ -198,6 +203,8 @@ class TargetRun:
         self.platform = platform or make_platform(cfg)
         self.result = TargetResult(image=image, slug=slug or slugify(image))
         self.kept_cleanup_name: str | None = None
+        # Everything a kept sandbox owns (sidecars, network), spared by the final sweep.
+        self.kept_names: set[str] = set()
         self.logdir = opts.out_dir / self.result.slug
         self._log = log
         self.box = None  # DockerSandbox or WindowsSandbox
@@ -265,13 +272,29 @@ class TargetRun:
         with self.stage("deploy") as st:
             for d in cfg.deploy:
                 self.box.copy_in(d.src, d.dest, d.exclude)
-            platform.upload_patch_files(self)
+            if hasattr(platform, "deploy_extras"):
+                platform.deploy_extras(self)
+            if self.patch:
+                platform.upload_patch_files(self)
             st.detail = (f"{len(cfg.deploy)} director{'y' if len(cfg.deploy) == 1 else 'ies'}, "
-                         f"{len(self.patch.files)} patch file(s)")
+                         f"{len(self.patch.files) if self.patch else 0} patch file(s)")
+
+        if hasattr(platform, "install"):
+            with self.stage("install") as st:
+                tail = platform.install(self, "deploy")
+                if tail:
+                    st.status, st.detail = "failed", "dependency install failed before the patch"
+                    raise StageFailed("dependencies failed to install on the unpatched code "
+                                      "(see install-deploy/ logs)", tail)
+                st.detail = f"{len(cfg.sandbox.install)} command(s)" if cfg.sandbox.install else "nothing to install"
 
         with self.stage("baseline"):
             r.baseline = self._phase("baseline")
             r.os = r.baseline.snapshot.os if r.baseline.snapshot else ""
+
+        if self.patch is None:
+            self._baseline_findings(r.baseline)
+            return
 
         if not platform.apply_patch(self):
             return
@@ -306,7 +329,7 @@ class TargetRun:
         for check in self.cfg.checks:
             if self.cancel.is_set():
                 raise Cancelled()
-            res = self.box.exec(check.run, timeout=check.timeout)
+            res = self.box.exec(check.run, timeout=check.timeout, workdir=self.cfg.sandbox.workdir)
             logf = self.write_log(f"{phase}/{slugify(check.name)}.log", res, f"$ {check.run}\n")
             cr = CheckResult(check.name, res.ok, res.exit_code, res.duration, res.timed_out,
                              log_file=logf)
@@ -330,6 +353,25 @@ class TargetRun:
             ph.snapshot = self.platform.capture(self)
         return ph
 
+    def _baseline_findings(self, ph: Phase) -> None:
+        """Baseline-only runs have nothing to compare with: report failures as they are."""
+        r = self.result
+        from .compare import CheckDelta
+        for check in self.cfg.checks:
+            c = ph.checks.get(check.name)
+            if c is None:
+                continue
+            r.deltas.append(CheckDelta(check.name, check.category, check.critical, c, None,
+                                       "ok" if c.passed else "still-failing"))
+            if not c.passed:
+                failing = sorted(k for k, v in c.cases.items() if v == results.FAIL)
+                r.findings.append(Finding("fail" if check.critical else "warn", "checks",
+                                          f"'{check.name}' fails on the current code",
+                                          failing or c.tail))
+        for cmd, ok in ph.services:
+            if not ok:
+                r.findings.append(Finding("fail", "services", f"service does not start: {cmd}"))
+
     def _compare(self, before: Phase, after: Phase) -> None:
         r = self.result
         for (cmd, ok_b), (_, ok_a) in zip(before.services, after.services):
@@ -349,6 +391,9 @@ class TargetRun:
         r = self.result
         broken = [n for n, c in baseline.checks.items()
                   if c.passed and not rolled.checks.get(n, c).passed]
+        # Per test too: a check that was already failing can still lose tests on the way back.
+        deltas, _ = compare_checks(self.cfg.checks, baseline.checks, rolled.checks)
+        broken += [f"{d.name}: {case}" for d in deltas for case in d.case_regressions]
         if broken:
             r.findings.append(Finding("fail", "rollback", "checks still failing after rollback",
                                       broken))
@@ -370,6 +415,10 @@ class TargetRun:
         if self.opts.keep_on_failure and r.verdict in ("FAIL", "ERROR") and self.box.started:
             r.kept_container = self.box.name
             self.kept_cleanup_name = getattr(self.box, "cleanup_name", self.box.name)
+            self.kept_names = {self.kept_cleanup_name, *getattr(self.box, "sidecars", [])}
+            if getattr(self.box, "private_network", None):
+                from .linux import NET
+                self.kept_names.add(NET + self.box.private_network)
             self.log(f"kept for debugging: {self.platform.debug_hint(self.box.name)} "
                      f"(remove with: {self.gc_command()})")
             return
@@ -399,7 +448,7 @@ def new_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
 
 
-def run(cfg: Config, patch: Patch, opts: Options) -> RunReport:
+def run(cfg: Config, patch: Patch | None, opts: Options) -> RunReport:
     run_id = opts.run_id or new_run_id()
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", run_id):
         raise ValueError(f"invalid run id: {run_id!r}")
@@ -410,7 +459,10 @@ def run(cfg: Config, patch: Patch, opts: Options) -> RunReport:
     cancel = threading.Event()
     report = RunReport(run_id, cfg, patch, dt.datetime.now().astimezone(), out_dir=opts.out_dir)
 
-    log("run", f"{run_id}: testing '{patch.label}' on {', '.join(images)}")
+    if opts.no_patch:
+        patch = None
+    log("run", f"{run_id}: " + (f"testing '{patch.label}'" if patch else "baseline checks (no patch)")
+        + f" on {', '.join(images)}")
     platform = make_platform(cfg)
     runs = [TargetRun(cfg, patch, img, run_id, opts, log, cancel, slug=slug)
             for img, slug in zip(images, unique_slugs(images))]
@@ -452,14 +504,15 @@ def run(cfg: Config, patch: Patch, opts: Options) -> RunReport:
     report.targets = [tr.result for tr in runs]
     # Safety net: sweep anything labelled with this run that was not deliberately kept.
     # Compare provider-level names (e.g. GCP lower-cases them), not display names.
-    kept = {tr.kept_cleanup_name for tr in runs if tr.kept_cleanup_name}
+    kept = {n for tr in runs for n in tr.kept_names}
     try:
         leftovers = [c for c in platform.leftovers(run_id) if c not in kept]
         if leftovers:
             platform.remove(leftovers)
     except SandboxError as e:
         log("run", f"final cleanup sweep failed: {e} (run 'python -m patchlab_internal gc')")
-    report.cleanup = (f"{len(kept)} sandbox(es) kept for debugging" if kept
+    n_kept = sum(1 for tr in runs if tr.kept_cleanup_name)
+    report.cleanup = (f"{n_kept} sandbox(es) kept for debugging" if n_kept
                       else "all sandboxes removed")
     report.finished = dt.datetime.now().astimezone()
     if report.cancelled and threading.current_thread() is threading.main_thread():
