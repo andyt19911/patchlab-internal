@@ -1,6 +1,6 @@
 # PatchLab Internal: estate control plane
 
-Status: M1, M2 and M6 built and run end to end on 2026-09-28 (M6 now covers container images, code scanning, committed secrets and CI workflows); M3–M5 proposed.
+Status: M1, M2 and M6 built and run end to end on 2026-09-28 (M6 covers container images, code scanning, committed secrets and CI workflows); M3 (nightly on GitHub Actions) and M4 (draft PRs, off) built; M5 proposed.
 Builds on [ESTATE_SURVEY.md](ESTATE_SURVEY.md). Revised after the
 [docs review](#appendix-review-items) of the first version.
 
@@ -302,14 +302,25 @@ run is repeated once: failures present in both runs are real, the rest flaky.
 **INCONCLUSIVE** go to the digest with what broke. Pre-existing failures never
 block, and are always listed.
 
-#### 4.1.5 Publish
+#### 4.1.5 Publish (M4, built; off)
 
-Today (`publish = "report-only"`): `pr.md` (the PR body: advisories, diff
-summary, lockfile table, gate, notes, what isn't covered, how it was tested)
-next to the patch and the full report. From M4, READY/REVIEW proposals become
-draft PRs on `patchlab-internal/<package>/<dep>`; one open PR per package and
-dependency, updated in place when a newer fix appears. It never touches
-branches it didn't create.
+`publish = "report-only"` (today) writes `pr.md` next to each patch and
+report. `estate publish` lists what it would open; `--apply` (and the cycle,
+once `publish = "draft-pr"`) does it:
+
+- Only READY and REVIEW decisions with a non-empty patch, tested on the
+  branch's **current** head. A stale one waits for the next cycle's re-test.
+- One branch per change, `patchlab/<package>/<key>`: one commit on the tested
+  commit, authored by PatchLab Internal. A draft PR against the repo's branch,
+  with `pr.md` as its body; REVIEW titles start `[needs review]`.
+- A branch PatchLab didn't write every commit of is left alone and reported.
+  An unchanged patch is not re-pushed (`state/published.json`).
+- At most 5 new PRs a run (`--max-prs`). It never merges, approves or marks a
+  PR ready for review.
+- Tokens: `PATCHLAB_INTERNAL_GITHUB_TOKEN_<OWNER>` (a fine-grained token covers
+  one owner) or `PATCHLAB_INTERNAL_GITHUB_TOKEN`, passed to git as an HTTP
+  header through `GIT_CONFIG_*` environment variables: never on a command
+  line, in a URL, or in a sandbox. The same tokens let `sync` read private repos.
 
 ### 4.2 Build health
 
@@ -576,20 +587,20 @@ targeted was fixed it is BLOCKED.
 Closed after M2 (see M6): Python, Go and Cargo findings are now proposed and
 tested, not just reported.
 
-### M3: build health on a schedule
+### M3: build health on a schedule — built 2026-09-28
 
-The runner host, `estate cycle` on a timer, a week of daily runs.
+`.github/workflows/estate-nightly.yml` runs `estate cycle` at 02:00 UTC on a
+GitHub-hosted runner (Andy's choice, 2026-09-28), and on demand. State
+carries over in the Actions cache; the digest is the run summary and an
+artifact with every decision, PR body and patch. It needs one read-only token
+per owner as repository secrets (the workflow's header lists them) and runs
+only from the default branch, so it starts once this branch is merged.
 
-**Done when:** a week of daily health runs for all six repos, with sentry and
-subsovereign covered despite having no working CI.
+### M4: draft PRs — built 2026-09-28, off
 
-### M4: draft PRs
-
-GitHub App, branch naming, one PR per package and dependency, the PR body from
-`pr.md`, updating its own branches.
-
-**Done when:** a READY proposal becomes a draft PR that a person can review and
-merge with no local steps.
+§4.1.5. A dry run at the M2/M6 commits lists 13 draft PRs across four repos
+(6 READY, 7 REVIEW). Turning it on is Andy's call: `publish = "draft-pr"` in
+estate.toml plus write access on the tokens.
 
 ### M5: drift rules and the Estate page
 

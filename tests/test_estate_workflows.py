@@ -59,5 +59,18 @@ class PinTests(unittest.TestCase):
         self.assertIsNone(workflows.parse_uses("./x"))
 
 
+class PermissionsTests(unittest.TestCase):
+    def test_added_before_jobs(self):
+        text, changed, writes = workflows.add_permissions("on: push\njobs:\n  a:\n    steps: []\n")
+        self.assertTrue(changed)
+        self.assertIn("permissions:\n  contents: read\n\njobs:", text)
+        self.assertEqual(writes, [])
+
+    def test_existing_block_is_kept_and_writers_are_flagged(self):
+        self.assertFalse(workflows.add_permissions("permissions: {}\njobs: {}\n")[1])
+        _, _, writes = workflows.add_permissions("jobs:\n  a:\n    steps:\n      - run: git push origin x\n")
+        self.assertEqual(writes, ["git push"])
+
+
 if __name__ == "__main__":
     unittest.main()

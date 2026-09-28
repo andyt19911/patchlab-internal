@@ -17,10 +17,10 @@ class GitError(Exception):
     pass
 
 
-def git(*args: str, cwd: Path | None = None, timeout: int = 600) -> str:
+def git(*args: str, cwd: Path | None = None, timeout: int = 600, auth_url: str | None = None) -> str:
     try:
         proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, timeout=timeout,
-                              env=_env())
+                              env={**_env(), **auth_env(auth_url)})
     except FileNotFoundError:
         raise GitError("git not found on PATH") from None
     except subprocess.TimeoutExpired:
@@ -38,16 +38,45 @@ def _env() -> dict:
     return env
 
 
+TOKEN_ENV = "PATCHLAB_INTERNAL_GITHUB_TOKEN"
+
+
+def token_for(url: str | None) -> str | None:
+    """The runner's GitHub token for ``url``'s owner: PATCHLAB_INTERNAL_GITHUB_TOKEN_<OWNER>
+    (a fine-grained token covers one owner), else PATCHLAB_INTERNAL_GITHUB_TOKEN. None
+    means the host's own git credentials are used."""
+    import os
+    import re
+    m = re.match(r"https://github\.com/([^/]+)/", url or "")
+    if not m:
+        return None
+    owner = re.sub(r"[^A-Z0-9]", "_", m.group(1).upper())
+    return os.environ.get(f"{TOKEN_ENV}_{owner}") or os.environ.get(TOKEN_ENV) or None
+
+
+def auth_env(url: str | None) -> dict:
+    """The token for ``url`` as an HTTP header, through git's environment config:
+    never on a command line, in a URL or in a repository's config."""
+    import base64
+    token = token_for(url)
+    if not token:
+        return {}
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"}
+
+
 def sync_mirror(url: str, dest: Path) -> None:
     """Create or refresh a bare mirror of ``url`` at ``dest``."""
     if (dest / "HEAD").is_file():
         git("remote", "set-url", "origin", url, cwd=dest)
-        git("fetch", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*", cwd=dest, timeout=1800)
+        git("fetch", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*", cwd=dest, timeout=1800,
+            auth_url=url)
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".partial")
     shutil.rmtree(tmp, ignore_errors=True)
-    git("clone", "--quiet", "--mirror", url, str(tmp), timeout=1800)
+    git("clone", "--quiet", "--mirror", url, str(tmp), timeout=1800, auth_url=url)
     tmp.rename(dest)
 
 

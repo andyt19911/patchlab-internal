@@ -132,6 +132,27 @@ def pin_text(text: str, resolve) -> tuple[str, list[dict]]:
     return "".join(out), pins
 
 
+# Signs a workflow writes with its token: then read-only would break it, so a person picks.
+WRITES = re.compile(r"git push|gh (?:pr|release|issue|api)|create-release|deploy-pages|upload-pages-artifact|"
+                    r"peter-evans/|stefanzweifel/|softprops/action-gh-release|github-script|"
+                    r"permissions:\s*write-all|:\s*write\b")
+
+
+def add_permissions(text: str) -> tuple[str, bool, list[str]]:
+    """Add a top-level ``permissions: contents: read`` to a workflow without one, just
+    before ``jobs:``. Returns the text, whether it changed, and any sign the workflow
+    writes with its token."""
+    if re.search(r"^permissions:", text, re.M):
+        return text, False, []
+    m = re.search(r"^jobs:", text, re.M)
+    if not m:
+        return text, False, []
+    writes = sorted({w.group(0) for w in WRITES.finditer(text)})
+    block = ("# Read-only unless a job asks for more (added by PatchLab Internal).\n"
+             "permissions:\n  contents: read\n\n")
+    return text[:m.start()] + block + text[m.start():], True, writes
+
+
 # ---------------------------------------------------------------- proposal
 
 def propose(estate, repo, sha: str) -> dict | None:
@@ -145,22 +166,28 @@ def propose(estate, repo, sha: str) -> dict | None:
             cache[(action, version)] = ls_remote(action, version)
         return cache[(action, version)]
     try:
-        pins, files = [], []
+        pins, files, perms, writers = [], [], [], []
         for wf in sorted((checkout / ".github" / "workflows").glob("*.y*ml")):
+            rel = wf.relative_to(checkout).as_posix()
             text, p = pin_text(wf.read_text(encoding="utf-8"), resolve)
-            if p:
-                pins += [{**x, "file": wf.relative_to(checkout).as_posix()} for x in p]
+            text, added, writes = add_permissions(text)
+            if p or added:
+                pins += [{**x, "file": rel} for x in p]
                 wf.write_text(text, encoding="utf-8")
-                files.append(wf.relative_to(checkout).as_posix())
-        if not pins:
+                files.append(rel)
+            if added:
+                perms.append(rel)
+                writers += [f"{rel}: {w}" for w in writes]
+        if not pins and not perms:
             return None
         out = estate.state_dir / "workflows" / repo.name / bridge.new_id("pin")
         out.mkdir(parents=True, exist_ok=True)
         gitops.git("diff", "--output", str(out / "change.patch"), cwd=checkout)
         diff = gitops.git("diff", "-U0", cwd=checkout)
-        # Every changed line must still be a uses: line naming the same action.
+        # Every changed line must be a uses: line or the added permissions block.
+        allowed = re.compile(r"^(# Read-only unless a job asks for more.*|permissions:|  contents: read|)$")
         stray = [line for line in diff.splitlines() if line[:1] in "+-" and not line.startswith(("+++", "---"))
-                 and not USES.match(line[1:])]
+                 and not USES.match(line[1:]) and not (line[0] == "+" and allowed.match(line[1:]))]
         after = scan_checkout(checkout)
     finally:
         gitops.remove_checkout(checkout)
@@ -171,17 +198,29 @@ def propose(estate, repo, sha: str) -> dict | None:
               "pinned to the commit their tag names now", unresolved),
             G("nothing left unpinned", not still, "a re-scan finds no unpinned action" if not still
               else "still unpinned", still),
-            G("only uses: lines changed", not stray, ", ".join(files), stray[:10])]
+            G("only uses: lines and permissions changed", not stray, ", ".join(files), stray[:10])]
+    if perms:
+        gate.append(G("read-only token", not writers,
+                      f"permissions: contents: read added to {len(perms)} workflow(s)" if not writers else
+                      "these workflows look like they write with their token; a person picks the permissions",
+                      writers[:10], kind="review"))
     failed = [g for g in gate if not g.ok]
-    verdict = triage.BLOCKED if failed else triage.READY
-    summary = ("Tested and safe to review: each action is pinned to the commit its tag points to today, so CI "
-               "runs exactly what it runs now." if not failed else
-               "Not proposed: " + "; ".join(f"{g.name} ({g.detail})" for g in failed) + ".")
+    blockers = [g for g in failed if g.kind == "blocker"]
+    verdict = triage.BLOCKED if blockers else triage.REVIEW if failed else triage.READY
+    summary = ("Not proposed: " + "; ".join(f"{g.name} ({g.detail})" for g in blockers) + "." if blockers else
+               "The checks pass, but a person needs to look first: " + "; ".join(g.name for g in failed) + "."
+               if failed else
+               "Tested and safe to review: actions are pinned to the commits their tags point to today, so CI runs "
+               "exactly what it runs now" + (", and workflows without a permissions block get a read-only token "
+                                             "(this PR's own CI run is the test of that)." if perms else "."))
     decision = triage.Decision(verdict, summary, gate, ["security", "ci"],
                                ["Dependabot or `estate actions --propose` moves the pins when the actions "
                                 "release; the comment keeps the version readable."])
     prop = {"kind": "actions", "repo": repo.name, "commit": sha, "pins": pins, "changed_files": files,
-            "plan": {"kind": "actions", "key": "pin-actions", "title": f"pin {len(pins)} GitHub Actions uses"}}
+            "permissions_added": perms,
+            "plan": {"kind": "actions", "key": "pin-actions",
+                     "title": f"pin {len(pins)} GitHub Actions uses" + (
+                         f"; read-only token for {len(perms)} workflow(s)" if perms else "")}}
     state.write_json(out / "proposal.json", prop)
     state.write_json(out / "decision.json", decision.to_dict())
     body = [f"## Pin GitHub Actions to commits in {repo.name}", "", f"**{decision.verdict}.** {decision.summary}",

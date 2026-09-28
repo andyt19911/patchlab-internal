@@ -7,7 +7,7 @@ import sys
 
 from ..config import ConfigError
 from ..sandbox import docker_available
-from . import digest, images, manifest, pipeline, state, workflows
+from . import digest, images, manifest, pipeline, publish, state, workflows
 
 
 def _estate(args) -> manifest.Estate:
@@ -193,7 +193,7 @@ def cmd_code_fix(args) -> int:
 def run_actions(est: manifest.Estate, repo: manifest.Repo, propose: bool, sha: str | None = None) -> dict | None:
     sha = sha or gitops_head(est, repo)
     data = workflows.latest_scan(est, repo, sha)
-    if not propose or not any(f["rule"] == "unpinned-action" for f in data["findings"]):
+    if not propose or not any(f["rule"] in ("unpinned-action", "no-permissions") for f in data["findings"]):
         return None
     _, prev = state.latest(est.state_dir / "workflows" / repo.name, "proposal.json")
     if prev and prev.get("commit") == sha:
@@ -220,6 +220,21 @@ def cmd_actions(args) -> int:
                     print(f"    {'ok ' if g['ok'] else 'NO '} {g['name']}: {g['detail']}")
                 worst = max(worst, 0 if d["verdict"] == "READY" else 1)
     return worst
+
+
+def cmd_publish(args) -> int:
+    est = _estate(args)
+    heads = {r.name: gitops_head(est, r) for r in est.repos
+             if (est.repos_dir / f"{r.name}.git" / "HEAD").is_file()}
+    with state.exclusive(est.state_dir):
+        steps = publish.run(est, heads, apply=args.apply, max_prs=args.max_prs)
+    for s in steps:
+        res = s.get("result", {})
+        what = res.get("url") or res.get("why") or s["why"]
+        print(f"{s['action'] if not res else res['status']:<8} {s['repo']:<24} {s['branch']}\n         {what}")
+    if not args.apply:
+        print("\n(dry run: nothing pushed. --apply publishes, when estate.toml has publish = \"draft-pr\")")
+    return 1 if any(s.get("result", {}).get("status") == "failed" for s in steps) else 0
 
 
 def cmd_health(args) -> int:
@@ -290,6 +305,15 @@ def cmd_cycle(args) -> int:
                 except Exception as e:
                     failures += 1
                     pipeline.log(f"{repo.name}: images failed: {type(e).__name__}: {e}")
+        if est.publish == "draft-pr" and not args.no_propose:
+            try:
+                for s in publish.run(est, heads, apply=True):
+                    if s.get("result"):
+                        pipeline.log(f"publish {s['branch']}: {s['result']['status']} "
+                                     f"{s['result'].get('url') or s['result'].get('why', '')}")
+            except Exception as e:
+                failures += 1
+                pipeline.log(f"publish failed: {type(e).__name__}: {e}")
     path = digest.write(est)
     print(path)
     return 2 if failures else 0
@@ -345,6 +369,11 @@ def register(sub) -> None:
     ac.add_argument("--commit")
     ac.add_argument("--propose", action="store_true")
     ac.set_defaults(func=cmd_actions)
+
+    pb = es.add_parser("publish", help="open or update draft PRs for READY/REVIEW changes (dry run by default)")
+    pb.add_argument("--apply", action="store_true", help="push branches and open draft PRs")
+    pb.add_argument("--max-prs", type=int, default=5, help="new PRs a run may open (default 5)")
+    pb.set_defaults(func=cmd_publish)
 
     h = es.add_parser("health", help="run each package's checks on the current code (no change)")
     h.add_argument("package", nargs="*")
