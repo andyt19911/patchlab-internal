@@ -225,6 +225,32 @@ rollback = "apt-get install -y --allow-downgrades openssl=3.0.13-0ubuntu3 libssl
 
 Validate a config without running anything: `python -m patchlab_internal validate my.toml`.
 
+### Code with dependencies and services
+
+For application code rather than OS packages (see
+[`examples/services`](examples/services/patchlab.toml)):
+
+```toml
+[sandbox]
+images  = ["node:20-bookworm"]
+workdir = "/src/app/backend"            # where install commands and checks start
+install = ["npm ci"]                    # after deploy, after the patch, after the rollback
+check_network = "isolated"              # checks reach the sidecars and nothing else
+ca_bundle = "/etc/ssl/corp-bundle.crt"  # optional: trust a TLS-inspecting proxy
+
+[[sidecars]]                            # reachable from checks as host "postgres"
+name   = "postgres"
+image  = "postgres:16"
+env    = { POSTGRES_PASSWORD = "throwaway" }
+health = "pg_isready -U postgres"
+
+[[mirrors]]                             # a private git dependency, without a token
+path = "/var/lib/mirrors/core.git"      # a bare repo the host fetched
+urls = ["ssh://git@github.com/Org/core.git", "https://github.com/Org/core.git"]
+```
+
+`run --no-patch` runs the checks once on the code as it is (a health check).
+
 ### Patch kinds
 
 | `--patch` | Use for | Applied with |
@@ -264,6 +290,29 @@ Sandboxes run with memory, CPU and PID limits and `no-new-privileges`.
 Patches and checks are still arbitrary code running as root in a container, so
 only test patches from sources you would run on a build server, and use
 `network = "none"` where the checks don't need network access.
+
+## Keeping an estate up to date
+
+`patchlab-internal estate` is the control plane on top of the engine: it keeps
+the repositories listed in [`estate.toml`](estate.toml) up to date and tested.
+
+```bash
+patchlab-internal estate validate                  # the manifest; refuses real credentials
+patchlab-internal estate sync                      # fetch the repos and private-dependency mirrors
+patchlab-internal estate scan subsovereign/backend # advisories and the changes that would fix them
+patchlab-internal estate propose subsovereign/backend nodemailer   # build, test, triage
+patchlab-internal estate health                    # every package's checks on the current code
+patchlab-internal estate digest                    # what needs a person, from the state files
+patchlab-internal estate cycle                     # all of the above: the nightly job
+```
+
+A proposal is the smallest version change that fixes every known advisory,
+built without running any dependency code, tested before and after (and after
+rolling back) in a sandbox with its services, and then put through a gate that
+fails closed: nothing regressed, no test lost, rollback verified, advisories
+gone, none introduced, only the manifest and lockfile changed. Read
+[docs/DESIGN.md](docs/DESIGN.md) for the lifecycle, the gate and what it can't
+guarantee, and [deploy/systemd](deploy/systemd) to run it nightly.
 
 ## CI integration
 

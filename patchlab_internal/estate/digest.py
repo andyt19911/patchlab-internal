@@ -88,7 +88,13 @@ def render(estate: Estate, rows: list[dict] | None = None) -> str:
         for nf in r["scan"].get("not_fixable", []):
             details += [f"- `{nf['name']}` ({nf['severity']}): {nf['reason']}"]
         if details:
-            L += ["", f"## {r['package'].id}", ""] + details
+            # A blank line before each bold heading keeps the Markdown lists apart.
+            spaced = []
+            for line in details:
+                if line.startswith("**") and spaced:
+                    spaced.append("")
+                spaced.append(line)
+            L += ["", f"## {r['package'].id}", ""] + spaced
     L.append("")
     return "\n".join(L)
 
