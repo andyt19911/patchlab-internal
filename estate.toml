@@ -110,6 +110,7 @@ branch = "main"
   not_covered = [
     "Live TLS and SSH probes: the tests stub the scanner binary, and checks run with no network.",
     "The API container image (CI's image job builds backend/Dockerfile; this runs the source).",
+    "Two netguard tests that resolve public names (one.one.one.one, example.com): deselected, because checks have no DNS.",
   ]
 
     [repo.package.env]
@@ -150,7 +151,7 @@ branch = "main"
 
     [[repo.package.checks]]
     name    = "tests"
-    run     = "python -m pytest tests/ -q -p no:cacheprovider --junitxml=/tmp/pytest.junit.xml"
+    run     = "python -m pytest tests/ -q -p no:cacheprovider --junitxml=/tmp/pytest.junit.xml --deselect tests/test_security.py::test_a_resolved_target_is_pinned --deselect tests/test_security.py::test_tls_ports_are_allowed"
     results = "junit:/tmp/pytest.junit.xml"
     timeout = 1800
 

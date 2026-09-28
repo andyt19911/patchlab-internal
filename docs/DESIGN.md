@@ -1,6 +1,6 @@
 # PatchLab Internal: estate control plane
 
-Status: M1 built and run end to end on 2026-09-28; M2 onwards proposed.
+Status: M1 and M2 built and run end to end on 2026-09-28; M3 onwards proposed.
 Builds on [ESTATE_SURVEY.md](ESTATE_SURVEY.md). Revised after the
 [docs review](#appendix-review-items) of the first version.
 
@@ -432,13 +432,42 @@ second one's comment says its origin is in `ALLOWED_ORIGINS` "for the test
 env", which neither the CI workflow nor this manifest sets, so it probably
 depends on a developer's `.env` (inferred, not confirmed).
 
-### M2: security updates for all six repos, report-only
+### M2: security updates for all six repos, report-only — done 2026-09-28
 
-Scanners for Python, Cargo and Go; `estate.toml` entries for all six repos;
-proposals and test runs for every current advisory in the survey. Daily digest.
+Built: `estate.toml` entries for all six repos (11 packages), each package's
+checks copied from that repo's own CI (sentry has none, so the commands its
+BUILD.md reports); Python, Go and Cargo scanners (§4.1.1); partial in-range
+fixes (below); `sync` that carries on past an unreachable repo.
 
-**Done when:** each advisory in the survey has either a tested proposal with a
-verdict or a stated reason why not.
+Evidence (cloud container with Docker, at the commits in the digest):
+
+| Package | Health | Advisories | Outcome |
+|---|---|---|---|
+| subsovereign/backend | failing (the 2 known tests, §M1) | 10 | nodemailer READY (M1) |
+| subsovereign/sdk-ios | not verified (macOS) | not scanned | — |
+| latticeiq/backend | healthy, 649 tests | 0 of 56 | — |
+| latticeiq/scanner-agent | healthy (build, vet, test) | 0 (govulncheck) | — |
+| latticeiq/frontend | healthy, 86 tests | 0 | — |
+| streamly-security-core | healthy (Node 24 only) | 0 | — |
+| caer/packages/orchestrator | healthy, 33 tests | 1 (undici) | in-range fix READY |
+| caer/packages/admin-console | healthy (typecheck only) | 6 | in-range fix REVIEW: 8 fixed, 2 react-router advisories need a major |
+| caer/packages/shared-schema | healthy (migrations from empty) | not scanned (SQL) | — |
+| sentinel/apps/proxy | healthy, 37 tests | 1 of 38 (cryptography) | manual: fixed in 50.0.0 |
+| sentry | healthy (workspace build and test) | 0 of 98 crates | — |
+
+Found and fixed in the manifest on the way: sentry's default branch is
+`master`; caer's data-migration tests must run from the repo root; two
+latticeiq netguard tests resolve public names, so they are deselected (checks
+have no DNS) and listed under `not_covered`.
+
+**Partial in-range fixes.** `npm audit fix` exits non-zero when some
+advisories need a breaking change, after fixing the rest. When the lockfile
+changed, the proposal keeps what npm fixed, records the rest as deferred, and
+the gate's "partial fix" item makes the verdict REVIEW, never READY. If nothing
+targeted was fixed it is BLOCKED.
+
+Still open for M2's "done when": the Python, Go and Cargo findings are
+reported, not proposed; sentinel's cryptography upgrade is the only one today.
 
 ### M3: build health on a schedule
 

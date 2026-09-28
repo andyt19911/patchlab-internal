@@ -11,6 +11,7 @@ The tools are pinned so a scan is repeatable. Bump them deliberately.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 
 from .npm import Advisory, Scan, Vulnerable
@@ -42,6 +43,11 @@ def _counts(vulnerable: list[Vulnerable]) -> dict[str, int]:
     return out
 
 
+def _version_key(v: str) -> tuple:
+    """Numeric release parts first, so 3.10 sorts after 3.9."""
+    return tuple(int(p) if p.isdigit() else -1 for p in re.split(r"[.+-]", v.lstrip("v")))
+
+
 # ---------------------------------------------------------------- python
 
 def python(tb, install: list[str]) -> Scan:
@@ -54,7 +60,9 @@ def python(tb, install: list[str]) -> Scan:
         res = tb.run(cmd, timeout=1800)
         if not res.ok:
             return Scan([], {}, f"install failed before the audit: {res.output.strip()[-300:]}")
-    freeze = tb.run("python -m pip freeze --all --exclude-editable > /tmp/audit-freeze.txt", timeout=120)
+    # Without --all: pip, setuptools and wheel belong to the base image, not the
+    # package, and are the image maintainer's to update.
+    freeze = tb.run("python -m pip freeze --exclude-editable > /tmp/audit-freeze.txt", timeout=120)
     if not freeze.ok:
         return Scan([], {}, f"pip freeze failed: {freeze.output.strip()[-300:]}")
     setup = tb.run(f"python -m venv /tmp/pip-audit && /tmp/pip-audit/bin/pip install -q "
@@ -78,10 +86,11 @@ def parse_pip_audit(text: str) -> Scan:
         return Scan([], {}, "pip-audit output has no dependency list")
     out = []
     for d in deps:
-        vulns = d.get("vulns") or []
+        # pip-audit can list one advisory twice (once per affected range).
+        vulns = list({v["id"]: v for v in d.get("vulns") or []}.values())
         if not vulns:
             continue
-        fixes = sorted({f for v in vulns for f in v.get("fix_versions") or []})
+        fixes = sorted({f for v in vulns for f in v.get("fix_versions") or []}, key=_version_key)
         out.append(Vulnerable(
             name=d["name"], severity=UNKNOWN, direct=False,
             advisories=[Advisory(id=v["id"], title=(v.get("description") or "")[:200], severity=UNKNOWN,
@@ -89,7 +98,9 @@ def parse_pip_audit(text: str) -> Scan:
                                  range=f"{d['name']}=={d.get('version', '?')}") for v in vulns],
             fix="in-range" if fixes else "none", fix_name=d["name"],
             fix_version=fixes[-1] if fixes else None))
-    return Scan(out, _counts(out))
+    counts = _counts(out)
+    counts["audited"] = len(deps)
+    return Scan(out, counts)
 
 
 # ---------------------------------------------------------------- go
@@ -189,4 +200,7 @@ def parse_cargo_audit(text: str) -> Scan:
         if patched:
             v.fix, v.fix_version = "in-range", ", ".join(patched)
     out = sorted(crates.values(), key=lambda v: v.name)
-    return Scan(out, _counts(out))
+    counts = _counts(out)
+    if isinstance((data.get("lockfile") or {}).get("dependency-count"), int):
+        counts["audited"] = data["lockfile"]["dependency-count"]
+    return Scan(out, counts)

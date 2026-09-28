@@ -109,6 +109,8 @@ def gate_for(report: dict | None, proposal: dict, unsupported: str | None = None
     remaining = proposal.get("remaining_advisories", [])
     introduced = proposal.get("introduced_advisories", [])
     audited = proposal.get("audit_after") is not None and not proposal.get("audit_after", {}).get("error")
+    if proposal.get("partial") and not proposal.get("fixed_advisories"):
+        remaining = remaining or ["npm reported a partial fix but nothing it targeted was fixed"]
     g.append(GateItem("advisories fixed", audited and not remaining,
                       (f"{len(proposal.get('fixed_advisories', []))} advisory(ies) no longer reported"
                        if audited and not remaining else
@@ -118,6 +120,11 @@ def gate_for(report: dict | None, proposal: dict, unsupported: str | None = None
                       "the re-audit reports nothing new" if audited and not introduced
                       else "re-audit did not run" if not audited else "the change brings in new advisories",
                       introduced))
+
+    deferred = proposal.get("deferred_advisories", [])
+    if deferred:
+        g.append(GateItem("partial fix", False, f"{len(deferred)} advisory(ies) need a breaking change "
+                          "and are left for a person", deferred, kind="review"))
 
     # 7. The change is only what it claims to be.
     stray = proposal.get("unexpected_files", [])

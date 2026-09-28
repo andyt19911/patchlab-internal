@@ -42,6 +42,10 @@ def render(estate: Estate, rows: list[dict] | None = None) -> str:
         for d in r["decisions"]:
             if d["decision"]["verdict"] in ("READY", "REVIEW"):
                 needs.append(f"{r['package'].id}: review the {d['key']} change ({d['decision']['verdict']})")
+        manual = r["scan"].get("not_fixable", [])
+        if manual:
+            needs.append(f"{r['package'].id}: {len(manual)} vulnerable package(s) with no automatic fix "
+                         f"({', '.join(m['name'] for m in manual[:5])})")
     L += ["## Needs a person", ""] + ([f"- {n}" for n in needs] or ["- Nothing today."]) + [""]
 
     L += ["## Packages", "", "| Package | Health | Advisories (in production code; ? = not known) | Proposals |", "|---|---|---|---|"]

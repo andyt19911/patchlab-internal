@@ -61,7 +61,9 @@ def cmd_scan(args) -> int:
                 print(json.dumps(res, indent=2))
                 continue
             vul = res.get("scan", {}).get("vulnerable", [])
-            print(f"{pkg.id} @ {res['commit'][:10]}: " + (res.get("error") or f"{len(vul)} vulnerable"))
+            audited = res.get("scan", {}).get("counts", {}).get("audited")
+            of = f" of {audited} audited" if audited is not None else ""
+            print(f"{pkg.id} @ {res['commit'][:10]}: " + (res.get("error") or f"{len(vul)} vulnerable{of}"))
             for p in res.get("plans", []):
                 print(f"  propose  {p['key']:<22} {p['severity']:<9} {'prod' if p['production'] else 'dev '}  "
                       f"{len(p['advisories'])} advisories")

@@ -291,6 +291,13 @@ class GateTests(unittest.TestCase):
                 d = triage.decide(report([check("tests", "ok")]), {**GOOD_PROPOSAL, **change})
                 self.assertEqual(d.verdict, triage.BLOCKED)
 
+    def test_partial_in_range_fix_needs_review(self):
+        partial = dict(GOOD_PROPOSAL, partial=True, deferred_advisories=["GHSA-rr"])
+        d = triage.decide(report([check("tests", "ok")]), partial)
+        self.assertEqual(d.verdict, triage.REVIEW)
+        nothing = dict(partial, fixed_advisories=[])
+        self.assertEqual(triage.decide(report([check("tests", "ok")]), nothing).verdict, triage.BLOCKED)
+
     def test_supply_chain_flags_need_review(self):
         prop = {**GOOD_PROPOSAL, "lock_diff": {"new_install_scripts": ["x@1"], "new_packages": ["x"]}}
         self.assertEqual(triage.decide(report([check("tests", "ok")]), prop).verdict, triage.REVIEW)
@@ -313,15 +320,16 @@ class AdvisoryParserTests(unittest.TestCase):
         out = json.dumps({"dependencies": [
             {"name": "jinja2", "version": "3.1.2", "vulns": [
                 {"id": "GHSA-h5c8-rqwp-cp95", "fix_versions": ["3.1.3"], "description": "XSS"},
-                {"id": "PYSEC-2024-1", "fix_versions": ["3.1.4"], "description": "more"}]},
+                {"id": "PYSEC-2024-1", "fix_versions": ["3.1.10", "3.1.4"], "description": "more"}]},
             {"name": "fastapi", "version": "0.139.0", "vulns": []}], "fixes": []})
         scan = advisories.parse_pip_audit(out)
         self.assertIsNone(scan.error)
         self.assertEqual([v.name for v in scan.vulnerable], ["jinja2"])
         v = scan.vulnerable[0]
-        self.assertEqual((v.fix_version, v.severity), ("3.1.4", "unknown"),
+        self.assertEqual((v.fix_version, v.severity), ("3.1.10", "unknown"),
                          "no severity is invented when the tool gives none")
         self.assertEqual(scan.advisory_ids(), {"GHSA-h5c8-rqwp-cp95", "PYSEC-2024-1"})
+        self.assertEqual(scan.counts["audited"], 2, "a clean result says how much was audited")
 
     def test_garbage_is_an_error_not_a_clean_bill(self):
         for parse in (advisories.parse_pip_audit, advisories.parse_govulncheck,

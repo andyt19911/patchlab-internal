@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -156,6 +157,14 @@ def propose(estate: Estate, pkg: Package, plan: npm.Plan, sha: str, out: Path) -
                 res = tb.run(f"npm audit fix --package-lock-only {npm.QUIET}", timeout=900)
                 if res.ok:
                     after, chosen = npm.audit(tb), "in-range"
+                elif not tb.run(f"git -C {root} diff --quiet -- {shlex.quote(lock_rel)}", timeout=60).ok:
+                    # npm exits non-zero when some advisories need a breaking
+                    # change, after fixing the rest. Keep what it fixed; what it
+                    # left is recorded as deferred and makes the verdict REVIEW.
+                    after, chosen = npm.audit(tb), "in-range"
+                    result["partial"] = True
+                    result["notes"].append("npm audit fix fixed what it could within the declared "
+                                           "ranges; the rest needs a breaking change and a person.")
                 else:
                     result["notes"].append("npm audit fix failed: " + res.output.strip()[-300:])
             if after is None:
@@ -202,7 +211,10 @@ def propose(estate: Estate, pkg: Package, plan: npm.Plan, sha: str, out: Path) -
     b_ids, a_ids = before.advisory_ids(), after.advisory_ids()
     targeted = {a.id for a in plan.advisories}
     result["fixed_advisories"] = sorted(targeted - a_ids)
-    result["remaining_advisories"] = sorted(targeted & a_ids)
+    remaining = sorted(targeted & a_ids)
+    if result.get("partial"):
+        result["deferred_advisories"], remaining = remaining, []
+    result["remaining_advisories"] = remaining
     result["introduced_advisories"] = sorted(a_ids - b_ids)
     result["diffstat"] = gitops.diff_stat(out / "change.patch")
     result["status"] = "proposed"
