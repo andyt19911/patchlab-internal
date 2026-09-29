@@ -453,6 +453,69 @@ re-scan finds nothing unpinned, and only `uses:` lines changed; CI then runs
 exactly the code it runs today, so it is READY without a CI run. Script
 injection goes to the repair agent through §4.7.
 
+### 4.9 The operator agent (M7, proposed)
+
+The cycle runs the same steps every night and stops at the gate. Anything it
+can't finish lands in the digest for a person: a scanner that timed out, an
+image that doesn't build on the runner, a REVIEW change nobody has looked at, a
+new Dockerfile the manifest doesn't list, a pinned tool that has a new release.
+The operator is a coding agent that picks those up, so that the digest's
+"Needs a person" list holds only decisions, never chores.
+
+**When it runs:** after each nightly cycle, in the same GitHub Actions
+workflow family (`estate-operator.yml`, triggered by the cycle finishing), and
+on demand. It gets the cycle's state folder and a checkout of patchlab-internal.
+
+**What it does, in order:**
+
+1. **Triage the run.** It reads `estate operator status`: a JSON account of the
+   cycle (steps that failed or were incomplete, with their logs; decisions and
+   their gates; code findings waiting on a verdict; drift). Nothing else is its
+   source of truth.
+2. **Retry what failed for a passing reason.** A network timeout or a registry
+   5xx gets one re-run of that step for that package (`estate operator retry`).
+   A second failure is recorded, not retried again.
+3. **Fix PatchLab.** When a failure is PatchLab's own (a parser that chokes on a
+   new advisory format, a missing ecosystem, a tool whose flags changed), the
+   agent writes the fix and its test in patchlab-internal and opens a draft PR
+   there. patchlab-internal's CI is its gate; Andy merges.
+4. **Keep the manifest current.** New packages, Dockerfiles and workflows in a
+   managed repo (found by `estate operator discover`) become an estate.toml
+   change in the same kind of PR, each one run once by `estate validate` and a
+   health run on the new package before the PR opens.
+5. **Keep the tools current.** Trivy, Opengrep, gitleaks, bandit and gosec are
+   pinned by version and checksum. A new release becomes a PR that moves the
+   pin, with the checksum taken from the release's own signed checksums file,
+   and a scan of one package on the old and new version so the difference is
+   visible.
+6. **Work the REVIEW list.** For each REVIEW decision it finds what stands
+   between it and READY. When that's a missing capability (for example "the
+   image doesn't build here"), it's step 3. When it's a genuine judgement
+   (a major upgrade, a test edit), it writes a short reviewer brief into the
+   decision's folder, which the Estate page and the PR body show.
+7. **Report.** One summary per night, in the step summary and the digest:
+   what it retried, what it fixed, the PRs it opened, and what still needs Andy.
+
+**What it can't do.** These limits are enforced by the workflow and the
+tools it's given, not by its instructions:
+
+- It never writes to a managed repo. Changes there still go only through
+  `estate publish`, with its own gate and Andy's switch.
+- It can't change its own permissions, the gate (`triage.py`), the publish
+  switch, the workflows or the secrets. A PR that touches those is refused by
+  a CI check before a person sees it.
+- It pushes only to branches named `operator/…` in patchlab-internal and
+  opens only draft PRs. Its token can't merge or approve.
+- Its tools are a fixed list: read the state and the repo, run
+  `patchlab-internal estate …` (never `publish --apply`), edit files in its
+  checkout, and open the PR. No shell beyond that.
+- Budget: a turn limit and a wall-clock limit per night, and at most three PRs
+  a night.
+
+**What it needs:** the same agent credential as `[repair]` (§8 item 6), as a
+repository secret. Without it the workflow runs `status` and stops, so the
+nightly summary still shows what the agent would have picked up.
+
 ## 5. Security
 
 ### 5.1 Access
@@ -641,6 +704,12 @@ test and the gate, not an agent's judgement. The gate would BLOCK a change
 that leaves a targeted test failing (unit-tested). With `[repair]` configured,
 the GDPR retention test (a real product bug: an erasure deletes a refund's
 reversal) goes through the same path.
+
+### M7: the operator agent — proposed
+
+§4.9. First the tool surface (`estate operator status | retry | discover`)
+and its tests, then the workflow with the agent off, then the agent on once
+the credential exists.
 
 ## 8. Decisions needed
 
