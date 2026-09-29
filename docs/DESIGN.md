@@ -1,6 +1,6 @@
 # PatchLab Internal: estate control plane
 
-Status: M1, M2 and M6 built and run end to end on 2026-09-28 (M6 covers container images, code scanning, committed secrets and CI workflows); M3 (nightly on GitHub Actions) and M4 (draft PRs, off) built; M5 proposed.
+Status: M1, M2 and M6 built and run end to end on 2026-09-28 (M6 covers container images, code scanning, committed secrets and CI workflows); M3 (nightly on GitHub Actions) and M4 (draft PRs, off) built; M5 proposed; M7 and M8 (the operator and analyst agents) wired into the nightly run for latticeiq only on 2026-09-29.
 Builds on [ESTATE_SURVEY.md](ESTATE_SURVEY.md). Revised after the
 [docs review](#appendix-review-items) of the first version.
 
@@ -453,7 +453,7 @@ re-scan finds nothing unpinned, and only `uses:` lines changed; CI then runs
 exactly the code it runs today, so it is READY without a CI run. Script
 injection goes to the repair agent through §4.7.
 
-### 4.9 The operator agent (M7, proposed)
+### 4.9 The operator agent (M7, wired for latticeiq)
 
 The cycle runs the same steps every night and stops at the gate. Anything it
 can't finish lands in the digest for a person: a scanner that timed out, an
@@ -463,8 +463,8 @@ The operator is a coding agent that picks those up, so that the digest's
 "Needs a person" list holds only decisions, never chores.
 
 **When it runs:** after each nightly cycle, in the same GitHub Actions
-workflow family (`estate-operator.yml`, triggered by the cycle finishing), and
-on demand. It gets the cycle's state folder and a checkout of patchlab-internal.
+workflow (`estate-nightly.yml`, after the cycle and the analyst), and on
+demand. It gets the cycle's state folder and a checkout of patchlab-internal.
 
 **What it does, in order:**
 
@@ -516,7 +516,7 @@ tools it's given, not by its instructions:
 repository secret. Without it the workflow runs `status` and stops, so the
 nightly summary still shows what the agent would have picked up.
 
-### 4.10 The analyst agent (M8, tools built)
+### 4.10 The analyst agent (M8, wired for latticeiq)
 
 The operator (§4.9) looks after PatchLab. The analyst looks after the work
 PatchLab does each night: it starts the cycle, watches it while it runs, and
@@ -743,19 +743,24 @@ that leaves a targeted test failing (unit-tested). With `[repair]` configured,
 the GDPR retention test (a real product bug: an erasure deletes a refund's
 reversal) goes through the same path.
 
-### M7: the operator agent — proposed
+### M7: the operator agent — wired, latticeiq only
 
 §4.9. Built 2026-09-29: the agent's tools (`estate operator status |
 discover | tools | brief | request-retry | run-requests | import-results |
 guard`), with tests. The cycle now records what failed in `state/cycles/`.
 `not_managed` on a repo lists paths deliberately left out.
 
-Not built yet, waiting on Andy's go-ahead: the workflow steps that run the
-agent. The planned wiring: the agent works on a copy of the state with no repo
-credentials and no way to run code; its briefs and retry requests are
-re-checked on the way back (`import-results`); its change to PatchLab is
-guarded and tested in a job with no secrets; a separate job that runs no repo
-code opens it as a draft PR on an `operator/` branch.
+Wired into the nightly workflow on 2026-09-29 (Andy: "only for latticeIQ at
+this stage"). `PATCHLAB_INTERNAL_AGENT_REPOS=latticeiq` is fixed in the
+workflow, and the tools, `import-results` and the guard refuse anything
+outside it; the agent steps run only while the cycle covers latticeiq alone.
+`.github/agents/run.sh` gives the agent a worktree and a copy of the state,
+an empty environment apart from its API key, restricted mode with Bash
+limited to its tool commands, and tools installed from the base commit. Its
+briefs and retry requests are re-checked on the way back; its change to
+PatchLab is guarded, linted and tested in a job with no secrets, and a
+separate job that runs no repo code opens it as a draft PR on an `operator/`
+branch. It needs the `ANTHROPIC_API_KEY` secret; `PATCHLAB_AGENTS=off` stops it.
 
 First `discover` on the synced repos: subsovereign's cli, dashboard and eight
 SDKs (sdk-vega has 7 high advisories in the survey), sentinel's dashboard, and
@@ -765,8 +770,10 @@ a Rust crate workspace that sentry's root package already covers.
 
 §4.10. Built 2026-09-29: progress, step timings and metrics written by every
 cycle, and `estate analyst watch | trends | explain | report`, with tests; the
-analysis in the digest and on the Estate page. The workflow steps that run the
-analyst wait, with the operator's, for Andy's go-ahead.
+analysis in the digest and on the Estate page. Wired on 2026-09-29 with the
+operator, latticeiq only: `watch --follow` runs beside the cycle and warns on
+the run about a stuck step, and after the cycle the agent writes the night's
+analysis through `estate analyst report`.
 
 ## 8. Decisions needed
 

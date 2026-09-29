@@ -30,6 +30,9 @@ from . import gitops, state
 from .manifest import Estate
 
 CYCLES = "cycles"
+# The repos the agents may see and act on (comma-separated). The nightly workflow sets it;
+# unset means every repo in estate.toml.
+AGENT_REPOS_ENV = "PATCHLAB_INTERNAL_AGENT_REPOS"
 REVIEW_BRIEF = "review.md"
 
 # Errors worth one more try: the network, a registry or a timeout, not PatchLab.
@@ -66,6 +69,43 @@ PACKAGE_FILES = {"package.json": "npm", "pyproject.toml": "python", "requirement
 SKIP_DIRS = re.compile(r"(^|/)(node_modules|vendor|third_party|\.git|dist|build|examples?|fixtures?|"
                        r"testdata|__tests__|tests?|docs?|samples?|[^/]*-next|[^/]*-sample)(/|$)")
 DOCKERFILE = re.compile(r"(^|/)(Dockerfile(\.[\w.-]+)?|[\w.-]+\.Dockerfile)$")
+
+
+# ---------------------------------------------------------------- scope
+
+def agent_repos() -> list[str]:
+    import os
+    return [r.strip() for r in os.environ.get(AGENT_REPOS_ENV, "").split(",") if r.strip()]
+
+
+def limit_to_agent_repos(estate: Estate) -> Estate:
+    """Narrow the estate to the agents' repos, when they are limited."""
+    only = agent_repos()
+    if only:
+        for name in only:
+            estate.repo(name)               # an unknown name is an error, not a silent no-op
+        estate.all_repos = list(estate.all_repos or estate.repos)
+        estate.repos = [r for r in estate.repos if r.name in only]
+    return estate
+
+
+def in_scope(estate: Estate, rel: str) -> bool:
+    """Whether a folder under state/ belongs to one of the estate's (possibly limited) repos."""
+    from . import images
+    top = PurePosixPath(rel).parts
+    if not top:
+        return False
+    if top[0] in {p.slug for p in estate.packages()}:
+        return True
+    if top[0] == "images" and len(top) > 1:
+        return top[1] in {images.image_dir(estate, r, i).name for r in estate.repos for i in r.images}
+    if top[0] == "workflows" and len(top) > 1:
+        return top[1] in {r.name for r in estate.repos}
+    return False
+
+
+def target_in_scope(estate: Estate, target: str) -> bool:
+    return target in {r.name for r in estate.repos} | {p.id for p in estate.packages()}
 
 
 # ---------------------------------------------------------------- the cycle record
@@ -119,6 +159,8 @@ def status(estate: Estate) -> dict:
     if cycle:
         retried = {(r["target"], r["step"]) for r in cycle.get("retries", [])}
         for f in cycle["failures"]:
+            if not target_in_scope(estate, f["target"]):
+                continue
             done = (f["target"], f["step"]) in retried
             needs.append({"kind": "failed-step", "target": f["target"], "step": f["step"], "error": f["error"],
                           "next": "already retried once: fix PatchLab or report it" if done
@@ -161,6 +203,8 @@ def _check_retry(estate: Estate, target: str, step: str) -> tuple[Path, dict]:
     path, cycle = last_cycle(estate)
     if not cycle:
         raise RuntimeError("no cycle has run yet")
+    if not target_in_scope(estate, target):
+        raise RuntimeError(f"{target} is outside the repos this agent covers")
     match = [f for f in cycle["failures"] if f["target"] == target and f["step"] == step]
     if not match:
         raise RuntimeError(f"{target} {step} did not fail in the last cycle")
@@ -232,6 +276,8 @@ def brief(estate: Estate, decision_id: str, text: str) -> Path:
     d = state.read_json(run / "decision.json")
     if not d:
         raise RuntimeError(f"no decision at {decision_id}")
+    if not in_scope(estate, run.relative_to(root).as_posix()):
+        raise RuntimeError(f"{decision_id} is outside the repos this agent covers")
     if d.get("verdict") != "REVIEW":
         raise RuntimeError(f"only REVIEW decisions get a brief ({decision_id} is {d.get('verdict')})")
     text = text.strip()
@@ -259,6 +305,15 @@ def import_results(estate: Estate, copy_workdir: Path) -> dict:
             out["briefs"].append(rel)
         except RuntimeError as e:
             out["refused"].append(f"brief {rel}: {e}")
+    from . import analyst
+    for f in sorted((copy_state / analyst.ANALYSIS).glob("*.md"))[-1:]:
+        try:
+            day = dt.date.fromisoformat(f.stem)
+            if day == dt.date.today():
+                analyst.save_report(estate, f.read_text(encoding="utf-8", errors="replace"), day)
+                out["analysis"] = f.stem
+        except (ValueError, RuntimeError) as e:
+            out["refused"].append(f"analysis {f.name}: {e}")
     real_path, _ = last_cycle(estate)
     copy_cycle = state.read_json(copy_state / CYCLES / real_path.name) if real_path else None
     for r in (copy_cycle or {}).get("requested", []):
@@ -339,7 +394,8 @@ def _vkey(v: str) -> tuple:
 
 # ---------------------------------------------------------------- guard
 
-def guard(changed: list[str], old_manifest: str | None = None, new_manifest: str | None = None) -> list[str]:
+def guard(changed: list[str], old_manifest: str | None = None, new_manifest: str | None = None,
+          allowed_repos: list[str] | None = None) -> list[str]:
     """Why the agent's change to patchlab-internal may not become a PR (empty: it may).
 
     estate.toml may gain packages and images in the repos it already lists. What
@@ -365,6 +421,10 @@ def guard(changed: list[str], old_manifest: str | None = None, new_manifest: str
             {n: (r.get("url"), r.get("branch")) for n, r in after.items()}:
         problems.append("estate.toml: the operator may not add, remove or re-point a repo")
     for name, r in after.items():
+        if allowed_repos and name not in allowed_repos and before.get(name) != r:
+            problems.append(f"estate.toml: {name}: outside the repos the operator covers "
+                            f"({', '.join(allowed_repos)})")
+            continue
         old_pkgs = {p.get("path"): p for p in before.get(name, {}).get("package", [])}
         for pkg in r.get("package", []):
             prev = old_pkgs.get(pkg.get("path"))

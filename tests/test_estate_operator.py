@@ -230,10 +230,36 @@ class GuardTests(unittest.TestCase):
             if why:
                 self.assertTrue(any(why in p for p in problems), (why, problems))
 
+    def test_limited_to_the_agent_repos(self):
+        added = MANIFEST + '  [[repo.package]]\n  path = "sdk"\n  ecosystem = "npm"\n'
+        self.assertEqual(operator.guard(["estate.toml"], MANIFEST, added, ["app"]), [])
+        self.assertIn("outside the repos", operator.guard(["estate.toml"], MANIFEST, added, ["latticeiq"])[0])
+
     def test_new_packages_default_to_isolated_checks(self):
         est = load()
         self.assertEqual(est.find("app/backend").check_network, "isolated")
         self.assertEqual(est.repos[0].not_managed, {"legacy": "retired, kept for reference"})
+
+
+class ScopeTests(unittest.TestCase):
+    def test_agents_see_only_their_repos(self):
+        est = load()
+        operator.record_cycle(est, dt.datetime.now(dt.timezone.utc), {}, [
+            {"target": "other/x", "step": "health", "error": "timed out"}])
+        decision(est, "app-backend/proposals/x/1", "REVIEW")
+        decision(est, "other-x/proposals/y/1", "REVIEW")
+        with mock.patch.dict(os.environ, {operator.AGENT_REPOS_ENV: "app"}):
+            operator.limit_to_agent_repos(est)
+        self.assertTrue(operator.in_scope(est, "app-backend/proposals/x/1"))
+        self.assertFalse(operator.in_scope(est, "other-x/proposals/y/1"))
+        with self.assertRaisesRegex(RuntimeError, "outside the repos"):
+            operator.brief(est, "other-x/proposals/y/1", "text")
+        with self.assertRaisesRegex(RuntimeError, "outside the repos"):
+            operator.request_retry(est, "other/x", "health")
+        self.assertEqual([n["kind"] for n in operator.status(est)["needs"]], ["review-brief"])
+        with mock.patch.dict(os.environ, {operator.AGENT_REPOS_ENV: "nope"}):
+            with self.assertRaises(Exception):
+                operator.limit_to_agent_repos(load())
 
 
 class CliTests(unittest.TestCase):

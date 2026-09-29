@@ -89,6 +89,47 @@ class ProgressAndWatchTests(unittest.TestCase):
         self.assertTrue(analyst.watch(est).get("died"))
 
 
+class FollowTests(unittest.TestCase):
+    def test_warns_once_per_stuck_step_then_stops_when_finished(self):
+        est = load()
+        state.write_json(est.state_dir / analyst.PROGRESS, {
+            "started": T0.isoformat(), "host": "elsewhere", "pid": 1, "done": [], "finished": None,
+            "current": {"target": "app/backend", "step": "health", "since": "2000-01-01T00:00:00+00:00"}})
+        calls = []
+
+        def sleep(_s):
+            calls.append(1)
+            if len(calls) == 2:
+                p = state.read_json(est.state_dir / analyst.PROGRESS)
+                p.update(finished=T0.isoformat(), current=None)
+                state.write_json(est.state_dir / analyst.PROGRESS, p)
+        import io
+        from contextlib import redirect_stdout
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = analyst.follow(est, 1, sleep=sleep, max_checks=10)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.getvalue().count("looks stuck"), 1)
+
+
+class FollowStartTests(unittest.TestCase):
+    def test_last_nights_finished_progress_is_not_mistaken_for_tonight(self):
+        est = load()
+        state.write_json(est.state_dir / analyst.PROGRESS, {"started": "2026-09-28T02:00:00+00:00", "host": "x",
+                                                            "pid": 1, "done": [], "current": None,
+                                                            "finished": "2026-09-28T03:00:00+00:00"})
+        calls = []
+
+        def sleep(_s):
+            calls.append(1)
+            if len(calls) == 3:          # tonight's cycle starts and finishes
+                state.write_json(est.state_dir / analyst.PROGRESS, {
+                    "started": T0.isoformat(), "host": "x", "pid": 1, "done": [], "current": None,
+                    "finished": T0.isoformat()})
+        self.assertEqual(analyst.follow(est, 1, sleep=sleep, max_checks=10), 0)
+        self.assertEqual(len(calls), 3)
+
+
 class TrendTests(unittest.TestCase):
     def test_metrics_then_trends(self):
         est = load()

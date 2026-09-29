@@ -360,7 +360,9 @@ def cmd_cycle(args) -> int:
 
 
 def cmd_analyst(args) -> int:
-    est = _estate(args)
+    est = operator.limit_to_agent_repos(_estate(args))
+    if args.an == "watch" and args.follow:
+        return analyst.follow(est, args.follow)
     if args.an == "watch":
         res = analyst.watch(est)
         print(json.dumps(res, indent=2))
@@ -385,12 +387,12 @@ def cmd_operator(args) -> int:
         def at(ref: str) -> str | None:
             r = subprocess.run(["git", "show", f"{ref}:estate.toml"], capture_output=True, text=True)
             return r.stdout if r.returncode == 0 else None
-        problems = operator.guard(changed, at(args.base), at("HEAD"))
+        problems = operator.guard(changed, at(args.base), at("HEAD"), operator.agent_repos())
         for pr in problems:
             print(f"refused: {pr}", file=sys.stderr)
         print(f"{len(changed)} file(s) changed; " + ("refused" if problems else "allowed"))
         return 1 if problems else 0
-    est = _estate(args)
+    est = operator.limit_to_agent_repos(_estate(args))
     if args.op == "status":
         print(json.dumps(operator.status(est), indent=2))
     elif args.op == "discover":
@@ -492,7 +494,9 @@ def register(sub) -> None:
 
     an = es.add_parser("analyst", help="the analyst agent's tools: watch, trends, explain, report")
     ans = an.add_subparsers(dest="an", required=True)
-    ans.add_parser("watch", help="JSON: the running cycle's step, and whether it looks stuck (exit 1 if so)")
+    aw = ans.add_parser("watch", help="JSON: the running cycle's step, and whether it looks stuck (exit 1 if so)")
+    aw.add_argument("--follow", type=int, metavar="SECONDS",
+                    help="keep checking every SECONDS until the cycle finishes, warning once per stuck step")
     at = ans.add_parser("trends", help="JSON: each package's numbers over recent cycles and what moved")
     at.add_argument("--days", type=int, default=30)
     ae = ans.add_parser("explain", help="JSON: the evidence for a package's failing tests")

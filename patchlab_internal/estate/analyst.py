@@ -132,6 +132,42 @@ def watch(estate: Estate, now: dt.datetime | None = None) -> dict:
             "usual_seconds": round(usual.total_seconds()) if usual else None, "looks_stuck": stuck}
 
 
+def follow(estate: Estate, every: int, sleep=None, max_checks: int | None = None) -> int:
+    """Watch a cycle until it finishes: one warning per stuck step (as a GitHub Actions
+    annotation when run there), and a note if the cycle dies. Returns 1 if anything was stuck."""
+    import sys
+    import time
+    sleep = sleep or time.sleep
+    warned: set[tuple] = set()
+    started_seen = False
+    # Started before the cycle, the progress file is still the last cycle's: wait for a new one.
+    stale = (state.read_json(estate.state_dir / PROGRESS) or {}).get("started")
+    checks = 0
+    while max_checks is None or checks < max_checks:
+        checks += 1
+        w = watch(estate)
+        if not started_seen and w.get("started") == stale and not w.get("running"):
+            sleep(every)
+            continue
+        if w.get("running"):
+            started_seen = True
+            cur = w.get("current") or {}
+            key = (cur.get("target"), cur.get("step"), cur.get("since"))
+            if w.get("looks_stuck") and key not in warned:
+                warned.add(key)
+                usual = f", usually {w['usual_seconds']}s" if w.get("usual_seconds") else ""
+                print(f"::warning title=Cycle step looks stuck::{cur.get('target')} {cur.get('step')} has run "
+                      f"{w['elapsed_seconds']}s{usual}", flush=True)
+        elif w.get("died"):
+            print(f"::warning title=Cycle died::{w.get('note')}", flush=True)
+            return 1
+        elif started_seen or w.get("finished"):
+            break
+        sleep(every)
+    print(f"watch: {len(warned)} stuck step(s)", file=sys.stderr)
+    return 1 if warned else 0
+
+
 # ---------------------------------------------------------------- metrics and trends
 
 def record_metrics(estate: Estate, when: dt.datetime, steps: list[dict]) -> int:
