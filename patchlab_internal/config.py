@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,10 +105,54 @@ class Patch:
 
 
 @dataclass
+class Sidecar:
+    """A service container (database, cache) started next to the sandbox for one run.
+
+    It joins a private per-run network under ``name``, so checks reach it by
+    that host name, and it is removed with the sandbox."""
+
+    name: str
+    image: str
+    env: dict[str, str] = field(default_factory=dict)
+    # Run inside the sidecar until it exits 0; the run waits for it before deploying.
+    health: str | None = None
+    # Replaces the image's default command (e.g. a headless browser's flags).
+    command: list[str] = field(default_factory=list)
+    memory: str = "1g"
+    health_timeout: int = 120
+
+
+@dataclass
+class Mirror:
+    """A host-side bare git repository served to the sandbox in place of a remote.
+
+    Private dependencies (npm ``github:`` specs, pip ``git+`` URLs, Cargo git
+    dependencies) resolve through it via git ``insteadOf`` rules, so the
+    sandbox never holds a credential for the real remote."""
+
+    path: Path
+    urls: list[str]
+
+
+@dataclass
 class Sandbox:
     images: list[str]
     setup: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    # Commands that install the code's dependencies. Unlike `setup` (cached in
+    # the image, before deploy), these run after deploy, again after the patch
+    # and again after a rollback, so a dependency change is really installed.
+    install: list[str] = field(default_factory=list)
+    install_timeout: int = 1800
+    # Directory in the sandbox that install commands and checks start in.
+    workdir: str | None = None
+    sidecars: list[Sidecar] = field(default_factory=list)
+    mirrors: list[Mirror] = field(default_factory=list)
+    # A host CA bundle to trust inside the sandbox (TLS-inspecting proxies).
+    ca_bundle: Path | None = None
+    # "isolated": checks run with no route out of the sandbox; only the
+    # sidecars are reachable. Install commands still get the network.
+    check_network: str = "open"
     memory: str = "2g"
     cpus: str = "2"
     pids: int = 2048
@@ -151,6 +197,8 @@ class Config:
     checks: list[Check]
     health: Health
     patch: Patch | None = None
+    # Free-form facts recorded in the report (repository, commit, package).
+    metadata: dict[str, str] = field(default_factory=dict)
 
     @property
     def base_dir(self) -> Path:
@@ -249,6 +297,44 @@ def parse_patch_spec(spec: str, default_target: str | None, platform: str = "lin
     return patch
 
 
+SIDECAR_NAME = re.compile(r"[a-z][a-z0-9-]{0,30}")
+
+
+def parse_sidecars(items: list, where: str = "[[sidecars]]") -> list[Sidecar]:
+    out = []
+    for i, sc in enumerate(items):
+        w = f"{where} #{i + 1}"
+        name = str(_require(sc, "name", w))
+        if not SIDECAR_NAME.fullmatch(name):
+            raise ConfigError(f"{w}: name must be a short lower-case host name, got {name!r}")
+        out.append(Sidecar(name=name, image=str(_require(sc, "image", w)),
+                           env={str(k): str(v) for k, v in sc.get("env", {}).items()},
+                           health=sc.get("health"), health_timeout=int(sc.get("health_timeout", 120)),
+                           command=(shlex.split(sc["command"]) if isinstance(sc.get("command"), str)
+                                    else _str_list(sc.get("command", []), f"{w} command")),
+                           memory=str(sc.get("memory", "1g"))))
+        if name == "app":
+            raise ConfigError(f"{w}: 'app' is the sandbox's own host name; pick another")
+    names = [s.name for s in out]
+    if len(names) != len(set(names)):
+        raise ConfigError(f"{where}: sidecar names must be unique")
+    return out
+
+
+def parse_mirrors(items: list, base: Path, where: str = "[[mirrors]]") -> list[Mirror]:
+    out = []
+    for i, m in enumerate(items):
+        w = f"{where} #{i + 1}"
+        path = (base / str(_require(m, "path", w))).expanduser().resolve()
+        if not path.is_dir():
+            raise ConfigError(f"{w}: mirror not found: {path} (run `estate sync` to create it)")
+        urls = _str_list(_require(m, "urls", w), w)
+        if not urls:
+            raise ConfigError(f"{w}: urls must list the remote URLs this mirror stands in for")
+        out.append(Mirror(path=path, urls=urls))
+    return out
+
+
 def load(path: str | Path) -> Config:
     path = Path(path).resolve()
     try:
@@ -294,6 +380,18 @@ def load(path: str | Path) -> Config:
         settle_seconds=int(sb.get("settle_seconds", 120)),
         max_reboots=int(sb.get("max_reboots", 4)),
     )
+    sandbox.install = _str_list(sb.get("install", []), "[sandbox].install")
+    sandbox.install_timeout = int(sb.get("install_timeout", 1800))
+    sandbox.workdir = sb.get("workdir")
+    sandbox.check_network = str(sb.get("check_network", "open"))
+    if sandbox.check_network not in ("open", "isolated"):
+        raise ConfigError("[sandbox].check_network must be 'open' or 'isolated'")
+    if sb.get("ca_bundle"):
+        sandbox.ca_bundle = (base / sb["ca_bundle"]).expanduser().resolve()
+        if not sandbox.ca_bundle.is_file():
+            raise ConfigError(f"[sandbox].ca_bundle not found: {sandbox.ca_bundle}")
+    sandbox.sidecars = parse_sidecars(data.get("sidecars", []))
+    sandbox.mirrors = parse_mirrors(data.get("mirrors", []), base)
     if not sandbox.images:
         raise ConfigError("[sandbox].images must list at least one image")
     if sandbox.platform not in PLATFORMS:
@@ -356,6 +454,9 @@ def load(path: str | Path) -> Config:
     )
 
     patch = _parse_patch(data["patch"], base, sandbox.platform) if "patch" in data else None
+
+    if windows and (sandbox.install or sandbox.sidecars or sandbox.mirrors):
+        raise ConfigError("install, sidecars and mirrors are supported on Linux targets only")
 
     return Config(
         name=data.get("name", path.stem),

@@ -104,13 +104,16 @@ const routes = [
   [/^#\/configs\/?$/, () => configsView()],
   [/^#\/config(\?.*)$/, (m) => configView(new URLSearchParams(m[1].slice(1)).get("path"))],
   [/^#\/environment\/?$/, () => environmentView()],
+  [/^#\/estate\/?$/, () => estateView()],
+  [/^#\/estate\/decision(\?.*)$/, (m) => decisionView(new URLSearchParams(m[1].slice(1)).get("id"))],
+  [/^#\/estate\/digest(\?.*)$/, (m) => digestView(new URLSearchParams(m[1].slice(1)).get("date"))],
 ];
 
 function route() {
   clearTimers();
   const hash = location.hash || "#/runs";
   const section = (hash.match(/^#\/(\w+)/) || [])[1];
-  const navKey = { runs: "runs", new: "new", configs: "configs", config: "configs", environment: "environment" }[section];
+  const navKey = { runs: "runs", new: "new", configs: "configs", config: "configs", environment: "environment", estate: "estate" }[section];
   document.querySelectorAll(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === navKey));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
@@ -467,4 +470,130 @@ async function environmentView() {
         h("div", { class: "panel" }, h("h2", {}, "Credentials available to runs"),
           h("p", { class: "small muted" }, "Runs inherit the environment this server started with. Cloud CLIs use their own logins."),
           Object.entries(env.secrets).map(([k, v]) => h("div", { class: "row small" }, h("code", {}, k), v ? h("span", { class: "badge v-PASS" }, "Set") : h("span", { class: "badge v-NONE" }, "Not set")))))));
+}
+
+// ------------------------------------------------------------------ estate (read-only)
+const DECISION_CLASS = { READY: "v-PASS", REVIEW: "v-WARN", BLOCKED: "v-FAIL", INCONCLUSIVE: "v-NONE" };
+const DECISION_TEXT = { READY: "Ready", REVIEW: "Needs review", BLOCKED: "Blocked", INCONCLUSIVE: "Inconclusive" };
+const HEALTH_CLASS = { healthy: "v-PASS", failing: "v-WARN", broken: "v-FAIL", error: "v-ERROR" };
+
+function decisionBadge(v, big) {
+  return h("span", { class: `badge ${DECISION_CLASS[v] || "v-NONE"}${big ? " big" : ""}` }, DECISION_TEXT[v] || v || "—");
+}
+function healthBadge(p) {
+  if (p.unsupported) return h("span", { class: "badge v-NONE", title: p.unsupported }, "Not verified here");
+  if (!p.health) return h("span", { class: "badge v-NONE" }, "Not run yet");
+  return h("span", { class: `badge ${HEALTH_CLASS[p.health] || "v-NONE"}` }, p.health);
+}
+function decisionHref(id) { return `#/estate/decision?id=${encodeURIComponent(id)}`; }
+function linkRow(href, ...cells) {
+  return h("tr", { class: "link", tabindex: "0", onclick: () => { location.hash = href; },
+    onkeydown: (e) => { if (e.key === "Enter") location.hash = href; } }, ...cells);
+}
+function stat(value, label, cls) {
+  return h("div", { class: `stat ${cls || ""}` }, h("strong", {}, String(value)), h("span", {}, label));
+}
+function table(headers, rows) {
+  return h("div", { class: "scroll" }, h("table", {},
+    h("thead", {}, h("tr", {}, headers.map(([t, c]) => h("th", { class: c || null }, t)))), h("tbody", {}, rows)));
+}
+
+async function estateView() {
+  const e = await api("/api/estate");
+  const ready = e.decisions.filter((d) => d.verdict === "READY").length;
+  const review = e.decisions.filter((d) => d.verdict === "REVIEW").length;
+  const blocking = e.packages.reduce((n, p) => n + p.code_blocking.length, 0);
+  const healthy = e.packages.filter((p) => p.health === "healthy").length;
+  const eol = e.images.filter((i) => i.bases.some((b) => b.support === "eol")).length;
+  const unpinned = e.workflows.reduce((n, w) => n + (w.counts["unpinned-action"] || 0), 0);
+
+  const decisions = e.decisions.length ? table([["Verdict"], ["Change"], ["Where", "hide-sm"], ["Kind", "hide-sm"]],
+    e.decisions.map((d) => linkRow(decisionHref(d.id),
+      h("td", {}, decisionBadge(d.verdict)),
+      h("td", {}, h("strong", {}, d.title), h("div", { class: "muted small" }, d.summary)),
+      h("td", { class: "hide-sm small" }, d.where),
+      h("td", { class: "hide-sm small nowrap" }, d.kind))))
+    : emptyState("No changes proposed", "A cycle proposes changes when it finds something it can fix.");
+
+  const packages = table([["Package"], ["Health"], ["Advisories", "hide-sm"], ["Code findings", "hide-sm"]],
+    e.packages.map((p) => h("tr", {},
+      h("td", {}, h("strong", {}, p.id), h("div", { class: "muted small mono" }, p.commit ? p.commit.slice(0, 10) : "")),
+      h("td", {}, healthBadge(p), p.passing_tests ? h("div", { class: "muted small" },
+        `${p.passing_tests} passing${p.failing ? `, ${p.failing} failing` : ""}${p.newly_failing.length ? ` (${p.newly_failing.length} new)` : ""}`) : null,
+        p.health_error ? h("div", { class: "small" }, p.health_error) : null),
+      h("td", { class: "hide-sm small" }, !p.scanned ? "not scanned yet" : p.scan_error && !p.advisories ? `not scanned (${p.scan_error})`
+        : p.advisories ? `${p.advisories} (${p.advisories_production} in production code)` : "none",
+        p.not_fixable.length ? h("div", {}, `${p.not_fixable.length} with no automatic fix`) : null),
+      h("td", { class: "hide-sm small" }, !p.code_scanned ? "not scanned yet"
+        : `${Object.values(p.code_counts).reduce((a, b) => a + b, 0)} (${p.code_counts.high || 0} high)` + (p.code_complete ? "" : ", incomplete"),
+        p.code_blocking.length ? h("details", {}, h("summary", {}, `${p.code_blocking.length} blocking`),
+          p.code_blocking.map((f) => h("div", { class: "finding fail" }, h("span", { class: "sev fail" }, f.tool.toUpperCase()),
+            h("code", {}, `${f.file}:${f.line}`), " ", f.message, f.code ? h("div", {}, h("code", {}, f.code)) : null))) : null))));
+
+  const images = table([["Dockerfile"], ["Base images"]], e.images.map((i) => h("tr", {},
+    h("td", { class: "small" }, i.id),
+    h("td", { class: "small" }, !i.scanned ? "not scanned yet" : i.error ? `not scanned (${i.error})`
+      : i.bases.map((b) => h("div", { class: "row" }, h("code", {}, b.image),
+        b.support === "eol" ? h("span", { class: "badge v-FAIL", title: b.eol ? `end of life ${b.eol}` : null }, "End of life")
+          : b.support === "ok" ? h("span", { class: "badge v-PASS" }, "Supported") : h("span", { class: "badge v-NONE" }, "Unknown"),
+        h("span", { class: "muted" }, b.scan_error ? "scan failed" : `${b.fixable} fixable (${b.fixable_high} high)`)))))));
+
+  const workflows = table([["Repo"], ["Findings"]], e.workflows.map((w) => h("tr", {},
+    h("td", {}, w.repo),
+    h("td", { class: "small" }, Object.entries(w.counts).map(([k, n]) => `${n} ${k}`).join(", ") || "none"))));
+
+  render(
+    h("div", { class: "page-head" }, h("div", { class: "title" }, h("h1", {}, "Estate"),
+      h("span", { class: "muted small" }, `${e.repos.length} repos · publishing ${e.publish === "draft-pr" ? "draft PRs" : "off (report only)"}`)),
+      e.digests.length ? h("a", { class: "button", href: `#/estate/digest?date=${encodeURIComponent(e.digests[0])}` }, `Digest ${e.digests[0]}`) : null),
+    h("div", { class: "stats" }, stat(ready, "ready to review", "v-PASS"), stat(review, "need a closer look", "v-WARN"),
+      stat(`${healthy}/${e.packages.length}`, "packages healthy"), stat(blocking, "blocking code findings", blocking ? "v-FAIL" : ""),
+      stat(eol, "images on end-of-life runtimes", eol ? "v-FAIL" : ""), stat(unpinned, "unpinned CI actions", unpinned ? "v-WARN" : "")),
+    e.publish !== "draft-pr" ? h("div", { class: "callout info" },
+      "Nothing here has been sent to a repository. Each change was tested in a sandbox; publishing as draft PRs is off until it is switched on.") : null,
+    e.analysis ? h("div", { class: "panel" }, h("h2", {}, `Analysis, ${e.analysis.date}`),
+      h("pre", { class: "toml prose" }, e.analysis.text)) : null,
+    h("div", { class: "panel" }, h("h2", {}, "Proposed changes"), decisions),
+    h("div", { class: "panel" }, h("h2", {}, "Packages"), packages),
+    h("div", { class: "two-col" },
+      h("div", { class: "panel" }, h("h2", {}, "Container images"), images),
+      h("div", { class: "panel" }, h("h2", {}, "CI workflows"), workflows,
+        e.digests.length ? h("div", {}, h("h3", {}, "Digests"), h("div", { class: "row" },
+          e.digests.map((d) => h("a", { href: `#/estate/digest?date=${encodeURIComponent(d)}` }, d)))) : null)),
+    h("p", { class: "muted small" }, "Read from ", h("code", {}, e.state_dir), "."));
+}
+
+function patchView(text) {
+  return h("pre", { class: "diff" }, text.split("\n").map((line) => {
+    const c = line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ") ? "meta"
+      : line.startsWith("@@") ? "hunk" : line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "";
+    return h("span", { class: c || null }, line || " ");
+  }));
+}
+
+async function decisionView(id) {
+  const x = await api(`/api/estate/decision?id=${encodeURIComponent(id || "")}`);
+  const d = x.decision;
+  const gate = (d.gate || []).map((g) => h("div", { class: `finding ${g.ok ? "info" : g.kind === "blocker" ? "fail" : "warn"}` },
+    h("span", { class: `sev ${g.ok ? "info" : "fail"}` }, g.ok ? "PASS" : "FAIL"), h("strong", {}, g.name), ": ", g.detail,
+    (g.details || []).length ? h("ul", {}, g.details.slice(0, 20).map((t) => h("li", {}, h("code", {}, t)))) : null));
+  render(
+    h("a", { class: "back", href: "#/estate" }, "← Estate"),
+    h("div", { class: "page-head" }, h("div", { class: "title" }, h("h1", {}, x.title), decisionBadge(d.verdict, true))),
+    h("div", { class: "panel" }, h("p", {}, d.summary),
+      h("div", { class: "grid-meta" },
+        h("div", {}, h("span", {}, "Tested on"), h("code", {}, x.commit ? x.commit.slice(0, 12) : "—")),
+        h("div", {}, h("span", {}, "Labels"), (d.labels || []).join(", ") || "—"),
+        h("div", {}, h("span", {}, "State folder"), h("code", {}, x.id))),
+      (d.notes || []).length ? h("ul", { class: "small" }, d.notes.map((n) => h("li", {}, n))) : null),
+    h("div", { class: "panel" }, h("h2", {}, "Gate"), gate.length ? gate : h("p", { class: "muted" }, "No gate recorded.")),
+    x.pr ? h("div", { class: "panel" }, h("h2", {}, "Pull request description"), h("pre", { class: "toml prose" }, x.pr)) : null,
+    x.patch ? h("div", { class: "panel" }, h("h2", {}, "Change"), patchView(x.patch)) : null);
+}
+
+async function digestView(date) {
+  const x = await api(`/api/estate/digest?date=${encodeURIComponent(date || "")}`);
+  render(h("a", { class: "back", href: "#/estate" }, "← Estate"),
+    h("div", { class: "page-head" }, h("h1", {}, `Digest ${x.date}`)),
+    h("div", { class: "panel" }, h("pre", { class: "toml prose" }, x.text)));
 }

@@ -15,7 +15,11 @@ from . import __version__, config, report, runner, settings
 
 def _cmd_run(args) -> int:
     cfg = config.load(args.config)
-    if args.patch:
+    if args.no_patch:
+        if args.patch or args.verify_rollback:
+            raise config.ConfigError("--no-patch cannot be combined with --patch or --verify-rollback")
+        patch = None
+    elif args.patch:
         default_target = cfg.deploy[0].dest if cfg.deploy else None
         patch = config.parse_patch_spec(args.patch, default_target, cfg.sandbox.platform)
         if cfg.patch and cfg.patch.kind == patch.kind:
@@ -27,7 +31,7 @@ def _cmd_run(args) -> int:
         patch = cfg.patch
     else:
         raise config.ConfigError("no patch given: add a [patch] table or pass --patch")
-    if args.rollback:
+    if args.rollback and patch:
         patch.rollback = args.rollback
 
     reason = runner.make_platform(cfg).available()
@@ -39,15 +43,15 @@ def _cmd_run(args) -> int:
     opts = runner.Options(
         out_dir=out, images=args.image or None, use_cache=not args.no_cache,
         keep_on_failure=args.keep_on_failure, verify_rollback=args.verify_rollback,
-        jobs=args.jobs, quiet=args.quiet, run_id=args.run_id)
+        jobs=args.jobs, quiet=args.quiet, run_id=args.run_id, no_patch=args.no_patch)
     rep = runner.run(cfg, patch, opts)
     paths = report.write_all(rep)
 
-    print(f"\n{report.ICON[rep.verdict]} {rep.verdict}: {patch.label}")
+    print(f"\n{report.ICON[rep.verdict]} {rep.verdict}: {report.patch_label(rep)}")
     for t in rep.targets:
         worst = [f for f in report._sorted_findings(t) if f.severity != "info"][:3]
-        print(f"  {t.image:<28} {t.verdict:<5}  " +
-              ("; ".join(f.message for f in worst) if worst else "no regressions"))
+        ok = "no regressions" if patch else "all checks pass"
+        print(f"  {t.image:<28} {t.verdict:<5}  " + ("; ".join(f.message for f in worst) if worst else ok))
     print(f"\nreports: {paths['html']}\n         {paths['markdown']}\n         {paths['json']}")
     print(f"cleanup: {rep.cleanup}")
 
@@ -64,6 +68,10 @@ def _cmd_validate(args) -> int:
     print(f"  target : {cfg.sandbox.platform} on {cfg.sandbox.provider}")
     print(f"  images : {', '.join(cfg.sandbox.images)}")
     print(f"  deploy : {', '.join(f'{d.src} -> {d.dest}' for d in cfg.deploy) or 'none'}")
+    if cfg.sandbox.install:
+        print(f"  install: {' && '.join(cfg.sandbox.install)} (after deploy, patch and rollback)")
+    if cfg.sandbox.sidecars:
+        print(f"  sidecars: {', '.join(f'{s.name}={s.image}' for s in cfg.sandbox.sidecars)}")
     print(f"  checks : {', '.join(c.name for c in cfg.checks)}")
     print(f"  patch  : {cfg.patch.label if cfg.patch else 'none (pass --patch)'}")
     return 0
@@ -147,7 +155,7 @@ def _cmd_web(args) -> int:
         print("error: the web front end is not installed: pip install ./web", file=sys.stderr)
         return 64
     return web.serve(s, host=args.host, port=args.port, open_browser=args.open,
-                     allow_remote=args.allow_remote)
+                     allow_remote=args.allow_remote, estate=args.estate)
 
 
 def _cmd_gc(args) -> int:
@@ -176,6 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--patch", metavar="SPEC", help="kind[:args]. Linux: source:fix.patch, "
                    "os-packages[:pkg,...], package-file:x.deb, script:hotfix.sh. Windows: "
                    "windows-update[:KB...], package-file:x.msu, script:fix.ps1")
+    r.add_argument("--no-patch", action="store_true",
+                   help="baseline only: run the checks once on the code as it is and report")
     r.add_argument("--image", action="append", metavar="IMAGE",
                    help="override target images (repeatable)")
     r.add_argument("--out", help="report directory (default: the setup reports folder, else ./reports)")
@@ -214,6 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--open", action="store_true", help="open the browser")
     w.add_argument("--allow-remote", action="store_true",
                    help="allow listening on a non-loopback address (access still needs the token)")
+    w.add_argument("--estate", metavar="PATH", help="estate.toml whose results the Estate page shows "
+                   "(default: $PATCHLAB_INTERNAL_ESTATE_MANIFEST, then estate.toml in the configs folder)")
     w.set_defaults(func=_cmd_web)
 
     g = sub.add_parser("gc", help="remove leftover sandboxes from crashed/killed runs")
@@ -223,6 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--run-id", help="only remove sandboxes of this run (without it, gc removes every "
                    "PatchLab Internal sandbox of the provider, so don't run it while tests are in progress)")
     g.set_defaults(func=_cmd_gc)
+
+    from .estate import cli as estate_cli
+    estate_cli.register(sub)
     return p
 
 
@@ -241,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     _utf8_output()
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "estate":
+            from .estate import cli as estate_cli
+            return estate_cli.run(args)
         return args.func(args)
     except config.ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)

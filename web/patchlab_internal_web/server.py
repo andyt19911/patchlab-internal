@@ -33,7 +33,7 @@ from patchlab_internal import __version__ as core_version
 from patchlab_internal import config as core_config
 from patchlab_internal import settings as core_settings
 
-from . import __version__, store
+from . import __version__, estate_view, store
 from .runs import Busy, RunManager, child_env
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -55,7 +55,7 @@ class HTTPError(Exception):
 
 class App:
     def __init__(self, s: core_settings.Settings, token: str, allowed_hosts: set[str] | None,
-                 runs: RunManager | None = None):
+                 runs: RunManager | None = None, estate: str | None = None):
         self.settings = s
         self.reports = s.reports_path().resolve()
         self.configs = s.configs_path().resolve()
@@ -63,6 +63,7 @@ class App:
         self.token = token
         self.allowed_hosts = allowed_hosts        # None = any (remote mode)
         self.runs = runs or RunManager(self.reports, self.configs, s.web.max_parallel_runs)
+        self.estate_manifest = estate_view.find_manifest(estate, self.configs)
 
     # ---------------------------------------------------------------- API handlers
     def session(self, h, q):
@@ -182,6 +183,32 @@ class App:
                 "secrets": {k: bool(os.environ.get(k)) for k in
                             ("PATCHLAB_INTERNAL_GUEST_PASSWORD", "PATCHLAB_INTERNAL_VCENTER_USER", "PATCHLAB_INTERNAL_VCENTER_PASSWORD")}}
 
+    # ---------------------------------------------------------------- estate (read-only)
+    def estate(self):
+        from patchlab_internal.estate import manifest
+        if self.estate_manifest is None:
+            raise HTTPError(404, "no estate manifest: start the front end with --estate PATH, set "
+                                 f"{estate_view.MANIFEST_ENV}, or put estate.toml in the configs folder")
+        try:
+            return manifest.load(self.estate_manifest)
+        except manifest.ConfigError as e:
+            raise HTTPError(400, f"estate manifest is not valid: {e}") from None
+
+    def estate_overview(self, h, q):
+        return estate_view.overview(self.estate())
+
+    def estate_decision(self, h, q):
+        try:
+            return estate_view.decision(self.estate(), q.get("id", [""])[0])
+        except store.NotFound:
+            raise HTTPError(404, "no such decision") from None
+
+    def estate_digest(self, h, q):
+        try:
+            return {"date": q.get("date", [""])[0], "text": estate_view.digest_text(self.estate(), q.get("date", [""])[0])}
+        except store.NotFound:
+            raise HTTPError(404, "no digest for that date") from None
+
     # ---------------------------------------------------------------- routing
     def route(self, h: "Handler") -> None:
         url = urllib.parse.urlsplit(h.path)
@@ -253,6 +280,12 @@ class App:
                 return h.send_json(self.gc(h, q, body))
             case ("GET", ["environment"]):
                 return h.send_json(self.environment(h, q))
+            case ("GET", ["estate"]):
+                return h.send_json(self.estate_overview(h, q))
+            case ("GET", ["estate", "decision"]):
+                return h.send_json(self.estate_decision(h, q))
+            case ("GET", ["estate", "digest"]):
+                return h.send_json(self.estate_digest(h, q))
         raise HTTPError(404, "not found")
 
     def authorised(self, h) -> bool:
@@ -357,9 +390,9 @@ def is_loopback(host: str) -> bool:
 
 
 def make_server(s: core_settings.Settings, host: str, port: int, token: str | None = None,
-                runs: RunManager | None = None) -> tuple[ThreadingHTTPServer, App]:
+                runs: RunManager | None = None, estate: str | None = None) -> tuple[ThreadingHTTPServer, App]:
     token = token or os.environ.get("PATCHLAB_INTERNAL_WEB_TOKEN") or secrets.token_urlsafe(24)
-    app = App(s, token, allowed_hosts_for(host, port), runs)
+    app = App(s, token, allowed_hosts_for(host, port), runs, estate)
     handler = type("PatchLabInternalHandler", (Handler,), {"app": app})
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
@@ -367,18 +400,19 @@ def make_server(s: core_settings.Settings, host: str, port: int, token: str | No
 
 
 def serve(s: core_settings.Settings, host: str | None = None, port: int | None = None,
-          open_browser: bool = False, allow_remote: bool = False) -> int:
+          open_browser: bool = False, allow_remote: bool = False, estate: str | None = None) -> int:
     host = host or s.web.host
     port = port if port is not None else s.web.port
     if not is_loopback(host) and not allow_remote:
         print(f"error: refusing to listen on {host}: the front end can start runs with your cloud "
               "credentials. Use 127.0.0.1 (and an SSH tunnel), or pass --allow-remote.", file=sys.stderr)
         return 64
-    httpd, app = make_server(s, host, port)
+    httpd, app = make_server(s, host, port, estate=estate)
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     url = f"http://{shown}:{httpd.server_address[1]}/?token={app.token}"
     print(f"PatchLab Internal front end {__version__} (core {core_version})")
     print(f"  reports: {app.reports}\n  configs: {app.configs}")
+    print(f"  estate : {app.estate_manifest or 'none (pass --estate PATH to review estate results)'}")
     print(f"\n  open: {url}\n\nPress Ctrl-C to stop (active runs are cancelled and cleaned up first).")
     if open_browser:
         threading.Timer(0.5, webbrowser.open, args=(url,)).start()

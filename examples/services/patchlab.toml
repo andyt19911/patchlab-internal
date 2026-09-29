@@ -1,0 +1,47 @@
+# Sidecar services, the install step and isolated checks, on Docker.
+#
+#   python -m patchlab_internal run examples/services/patchlab.toml --verify-rollback
+#   python -m patchlab_internal run examples/services/patchlab.toml --no-patch
+#
+# The "install" step stands in for `npm ci` / `pip install`: it runs after
+# deploy, again after the patch and again after the rollback, so the checks
+# always see dependencies that match the code. "installed-matches" fails if it didn't.
+name = "services-example"
+
+[sandbox]
+images = ["python:3.12-slim"]
+workdir = "/srv/app"
+install = ["cp version /tmp/installed-version"]
+# Checks can reach the sidecars and nothing else.
+check_network = "isolated"
+
+[[sidecars]]
+name = "postgres"
+image = "postgres:16"
+env = { POSTGRES_PASSWORD = "throwaway" }
+health = "pg_isready -U postgres"
+
+[[deploy]]
+src = "app"
+dest = "/srv/app"
+
+[[checks]]
+name = "database-reachable"
+run = "python3 -c \"import socket; socket.create_connection(('postgres', 5432), 5)\""
+
+[[checks]]
+name = "no-route-out"
+run = "! python3 -c \"import socket; socket.create_connection(('1.1.1.1', 443), 5)\""
+
+[[checks]]
+name = "installed-matches"
+run = "cmp version /tmp/installed-version"
+
+[patch]
+kind = "script"
+description = "bump the app to v2"
+run = "echo v2 > /srv/app/version"
+rollback = "echo v1 > /srv/app/version"
+
+[health]
+enabled = false

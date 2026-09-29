@@ -1,0 +1,24 @@
+# The estate cycle: sync, health, scan, propose and test, digest.
+# Runs as a dedicated user that is in the docker group and owns the workdir.
+# Its git credentials (a GitHub App installation token or a read-only
+# fine-grained token, via a git credential helper) are for fetching only;
+# no credential is ever passed into a sandbox.
+[Unit]
+Description=PatchLab Internal estate cycle
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=patchlab
+WorkingDirectory=/opt/patchlab-internal
+Environment=PATCHLAB_INTERNAL_ESTATE_WORKDIR=/var/lib/patchlab-internal/estate
+ExecStart=/opt/patchlab-internal/.venv/bin/patchlab-internal estate -m /opt/patchlab-internal/estate.toml cycle
+# On timeout systemd sends SIGTERM, which the engine treats as a cancel: it
+# tears down its sandboxes, sidecars and networks before exiting.
+TimeoutStartSec=6h
+Nice=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/patchlab-internal
+PrivateTmp=yes

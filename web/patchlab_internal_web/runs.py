@@ -126,7 +126,9 @@ class RunManager:
         job = self.get(run_id)
         if not job or not job.proc:
             return False
-        if job.status == "cancelling":
+        # A repeated click can land after the run has already stopped; it
+        # asked for what happened, so it succeeds without another signal.
+        if job.status in ("cancelling", "cancelled"):
             return True
         if job.status != "running":
             return False

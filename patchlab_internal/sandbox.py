@@ -18,6 +18,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 LABEL = "patchlab_internal"
+# The sandbox's host name on its private network, so a sidecar (a browser) can reach the app.
+APP_ALIAS = "app"
 RUN_LABEL = "patchlab_internal.run"
 CACHE_REPO = "patchlab-internal-cache"
 
@@ -82,7 +84,7 @@ class DockerSandbox:
     caps: dict = {}   # containers cannot reboot or checkpoint
 
     def __init__(self, image: str, run_id: str, name: str, *, memory: str, cpus: str,
-                 pids: int, network: str, env: dict[str, str]):
+                 pids: int, network: str, env: dict[str, str | None]):
         self.image = image
         self.run_id = run_id
         self.name = name
@@ -92,6 +94,10 @@ class DockerSandbox:
         self.network = network
         self.env = env
         self.started = False
+        # Sidecar containers and the private network they share with this
+        # sandbox; destroy() removes them together.
+        self.sidecars: list[str] = []
+        self.private_network: str | None = None
 
     def start(self) -> None:
         args = [
@@ -102,8 +108,12 @@ class DockerSandbox:
             "--security-opt", "no-new-privileges",
             "--entrypoint", "",
         ]
+        if self.private_network and self.network == self.private_network:
+            args += ["--network-alias", APP_ALIAS]
         for k, v in self.env.items():
-            args += ["-e", f"{k}={v}"]
+            # None: docker copies the value from this process's environment,
+            # so a credential never appears on a command line.
+            args += ["-e", k if v is None else f"{k}={v}"]
         args += [self.image, "sleep", "infinity"]
         # Allow time for the image pull on first use.
         _docker(*args, timeout=900)
@@ -158,16 +168,76 @@ class DockerSandbox:
     def commit(self, tag: str) -> None:
         _docker("commit", "--change", f"LABEL {LABEL}.cache=1", self.name, tag, timeout=600)
 
+    def connect(self, network: str, alias: str | None = None) -> None:
+        args = ["network", "connect"] + (["--alias", alias] if alias else []) + [network, self.name]
+        _docker(*args, timeout=60)
+
+    def disconnect(self, network: str) -> None:
+        _docker("network", "disconnect", "-f", network, self.name, timeout=60)
+
     def destroy(self) -> None:
         if self.started:
             _docker("rm", "-f", "-v", self.name, check=False, timeout=120)
             self.started = False
+        if self.sidecars:
+            remove_containers(self.sidecars)
+            self.sidecars = []
+        if self.private_network:
+            _docker("network", "rm", self.private_network, check=False, timeout=60)
+            self.private_network = None
 
     def __enter__(self) -> "DockerSandbox":
         return self
 
     def __exit__(self, *exc) -> None:
         self.destroy()
+
+
+def create_network(name: str, run_id: str) -> str:
+    """A per-run network with no route out: sidecars live only on this one."""
+    _docker("network", "create", "--internal", "--label", f"{LABEL}=1",
+            "--label", f"{RUN_LABEL}={run_id}", name, timeout=60)
+    return name
+
+
+def start_sidecar(image: str, run_id: str, name: str, alias: str, network: str,
+                  env: dict[str, str], memory: str = "1g", command: list[str] | None = None) -> str:
+    args = ["run", "-d", "--name", name, "--label", f"{LABEL}=1", "--label", f"{RUN_LABEL}={run_id}",
+            "--network", network, "--network-alias", alias, "--memory", memory,
+            "--security-opt", "no-new-privileges"]
+    for k, v in env.items():
+        args += ["-e", f"{k}={v}"]
+    _docker(*args, image, *(command or []), timeout=900)
+    return name
+
+
+def wait_healthy(name: str, command: str, timeout: int) -> bool:
+    """Run ``command`` inside the container until it exits 0 or ``timeout`` passes."""
+    end = time.monotonic() + timeout
+    while True:
+        proc = _docker("exec", name, "sh", "-c", command, check=False, timeout=60)
+        if proc.returncode == 0:
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(2)
+
+
+def container_logs(name: str, lines: int = 40) -> str:
+    proc = _docker("logs", "--tail", str(lines), name, check=False, timeout=60)
+    return _dec(proc.stdout) + _dec(proc.stderr)
+
+
+def remove_network(name: str) -> None:
+    _docker("network", "rm", name, check=False, timeout=60)
+
+
+def _remove_networks(label: str) -> list[str]:
+    proc = _docker("network", "ls", "-q", "--filter", f"label={label}", check=False, timeout=60)
+    ids = proc.stdout.decode().split()
+    for i in ids:
+        _docker("network", "rm", i, check=False, timeout=60)
+    return ids
 
 
 def _dec(b: bytes | None) -> str:
@@ -193,14 +263,23 @@ def remove_containers(names: list[str]) -> None:
         _docker("rm", "-f", "-v", *names, check=False, timeout=300)
 
 
+def run_networks(run_id: str) -> list[str]:
+    proc = _docker("network", "ls", "--format", "{{.Name}}", "--filter",
+                   f"label={RUN_LABEL}={run_id}", check=False, timeout=60)
+    return proc.stdout.decode().split()
+
+
 def remove_run(run_id: str) -> list[str]:
-    """Force-remove every container belonging to one run."""
-    return _remove_by_label(f"{RUN_LABEL}={run_id}")
+    """Force-remove every container (sidecars included) and network of one run."""
+    removed = _remove_by_label(f"{RUN_LABEL}={run_id}")
+    _remove_networks(f"{RUN_LABEL}={run_id}")
+    return removed
 
 
 def gc(include_cache: bool = False) -> tuple[list[str], list[str]]:
-    """Remove all PatchLab Internal containers (and optionally cached setup images)."""
+    """Remove all PatchLab Internal containers and networks (and optionally cached setup images)."""
     containers = _remove_by_label(f"{LABEL}=1")
+    _remove_networks(f"{LABEL}=1")
     images: list[str] = []
     if include_cache:
         proc = _docker("images", "-q", "--filter", f"label={LABEL}.cache=1", check=False)
