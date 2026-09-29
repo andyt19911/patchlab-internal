@@ -111,6 +111,8 @@ class Repo:
     branch: str = "main"
     packages: list[Package] = field(default_factory=list)
     images: list[Image] = field(default_factory=list)
+    # Paths in the repo deliberately left out (path -> why), so discovery doesn't report them.
+    not_managed: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -261,7 +263,8 @@ def load(path: str | Path) -> Estate:
     for i, r in enumerate(data.get("repo", [])):
         w = f"[[repo]] #{i + 1}"
         repo = Repo(name=str(_req(r, "name", w)), url=str(_req(r, "url", w)),
-                    branch=str(r.get("branch", "main")))
+                    branch=str(r.get("branch", "main")),
+                    not_managed={str(k).strip("/"): str(v) for k, v in r.get("not_managed", {}).items()})
         if not NAME.fullmatch(repo.name):
             raise ConfigError(f"{w}: invalid name {repo.name!r}")
         if not repo.url.startswith("https://"):

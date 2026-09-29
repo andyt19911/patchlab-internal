@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import sys
+from pathlib import Path
 
 from ..config import ConfigError
 from ..sandbox import docker_available
-from . import digest, images, manifest, pipeline, publish, state, workflows
+from . import digest, images, manifest, operator, pipeline, publish, state, workflows
 
 
 def _estate(args) -> manifest.Estate:
@@ -263,7 +265,14 @@ def cmd_cycle(args) -> int:
     test every fixable advisory, digest."""
     est = _estate(args)
     _need_docker()
-    failures = 0
+    # What went wrong, recorded for the digest reader and the operator agent (operator.py).
+    failures: list[dict] = []
+
+    def failed(target: str, step: str, err: str) -> None:
+        failures.append({"target": target, "step": step, "error": err[-2000:]})
+        pipeline.log(f"{target}: {step} failed: {err}")
+
+    started = dt.datetime.now(dt.timezone.utc)
     # Limit a cycle to some repos (--repo, or PATCHLAB_INTERNAL_ESTATE_REPOS="a,b"), e.g. while
     # a new runner is watched over a few nights. The rest are neither synced nor touched.
     only = args.repo or [r.strip() for r in os.environ.get("PATCHLAB_INTERNAL_ESTATE_REPOS", "").split(",")
@@ -284,11 +293,9 @@ def cmd_cycle(args) -> int:
                     from . import gitops
                     gitops.sync_mirror(r.url, pipeline.mirror_path(est, r.name))
                 except Exception as e:
-                    failures += 1
-                    pipeline.log(f"sync {r.name} (code-scanning rules) failed: {e}")
+                    failed(r.name, "sync", f"(code-scanning rules) {e}")
         for name, err in errors.items():
-            failures += 1
-            pipeline.log(f"sync {name} failed: {err}")
+            failed(name, "sync", err)
         for pkg in est.packages():
             if pkg.repo.name not in heads:
                 # Never test a stale checkout as if it were current.
@@ -311,21 +318,18 @@ def cmd_cycle(args) -> int:
                             if not pipeline.code_fixed_already(est, pkg, code["commit"], plan["key"]):
                                 pipeline.code_fix_and_test(est, pkg, plan["key"], code["commit"])
                 except Exception as e:   # recorded in the digest via the missing state, and here
-                    failures += 1
-                    pipeline.log(f"{pkg.id}: {step} failed: {type(e).__name__}: {e}")
+                    failed(pkg.id, step, f"{type(e).__name__}: {e}")
         for repo in est.repos:
             if repo.name in heads:
                 try:
                     run_actions(est, repo, not args.no_propose, heads[repo.name])
                 except Exception as e:
-                    failures += 1
-                    pipeline.log(f"{repo.name}: actions failed: {type(e).__name__}: {e}")
+                    failed(repo.name, "actions", f"{type(e).__name__}: {e}")
             if repo.images and repo.name in heads:
                 try:
                     run_images(est, repo, not args.no_propose, heads[repo.name])
                 except Exception as e:
-                    failures += 1
-                    pipeline.log(f"{repo.name}: images failed: {type(e).__name__}: {e}")
+                    failed(repo.name, "images", f"{type(e).__name__}: {e}")
         if est.publish == "draft-pr" and not args.no_propose:
             try:
                 for s in publish.run(est, heads, apply=True):
@@ -333,11 +337,54 @@ def cmd_cycle(args) -> int:
                         pipeline.log(f"publish {s['branch']}: {s['result']['status']} "
                                      f"{s['result'].get('url') or s['result'].get('why', '')}")
             except Exception as e:
-                failures += 1
-                pipeline.log(f"publish failed: {type(e).__name__}: {e}")
+                failed("estate", "publish", f"{type(e).__name__}: {e}")
+        operator.record_cycle(est, started, heads, failures, no_propose=args.no_propose)
     path = digest.write(est)
     print(path)
     return 2 if failures else 0
+
+
+def cmd_operator(args) -> int:
+    import subprocess
+    if args.op == "guard":
+        # Run in the patchlab-internal checkout holding the operator's commits.
+        def git(*a: str) -> str:
+            return subprocess.run(["git", *a], capture_output=True, text=True, check=True).stdout
+        changed = git("diff", "--name-only", f"{args.base}...HEAD").split()
+        def at(ref: str) -> str | None:
+            r = subprocess.run(["git", "show", f"{ref}:estate.toml"], capture_output=True, text=True)
+            return r.stdout if r.returncode == 0 else None
+        problems = operator.guard(changed, at(args.base), at("HEAD"))
+        for pr in problems:
+            print(f"refused: {pr}", file=sys.stderr)
+        print(f"{len(changed)} file(s) changed; " + ("refused" if problems else "allowed"))
+        return 1 if problems else 0
+    est = _estate(args)
+    if args.op == "status":
+        print(json.dumps(operator.status(est), indent=2))
+    elif args.op == "discover":
+        print(json.dumps(operator.discover(est), indent=2))
+    elif args.op == "tools":
+        print(json.dumps(operator.tool_releases(), indent=2))
+    elif args.op == "brief":
+        text = Path(args.file).read_text(encoding="utf-8") if args.file != "-" else sys.stdin.read()
+        print(operator.brief(est, args.decision, text))
+    elif args.op == "request-retry":
+        print(json.dumps(operator.request_retry(est, args.target, args.step)))
+    elif args.op == "import-results":
+        res = operator.import_results(est, Path(args.copy))
+        print(json.dumps(res, indent=2))
+    elif args.op == "retry":
+        _need_docker()
+        res = operator.retry(est, args.target, args.step)
+        print(json.dumps(res, indent=2))
+        return 0 if res["ok"] else 1
+    elif args.op == "run-requests":
+        _need_docker()
+        results = operator.run_requests(est)
+        print(json.dumps(results, indent=2))
+        return 0 if all(r["ok"] for r in results) else 1
+    return 0
 
 
 def register(sub) -> None:
@@ -411,6 +458,27 @@ def register(sub) -> None:
     d = es.add_parser("digest", help="write today's digest from the state directory")
     d.add_argument("-q", "--quiet", action="store_true", help="print only the path")
     d.set_defaults(func=cmd_digest)
+
+    op = es.add_parser("operator", help="the operator agent's tools: status, retry, brief, discover, tools, guard")
+    ops = op.add_subparsers(dest="op", required=True)
+    ops.add_parser("status", help="JSON: the last cycle and everything that still needs something")
+    ops.add_parser("discover", help="JSON: packages and Dockerfiles estate.toml doesn't list")
+    ops.add_parser("tools", help="JSON: pinned scanner versions against their latest releases")
+    ob = ops.add_parser("brief", help="write the reviewer brief for a REVIEW decision")
+    ob.add_argument("decision", help="the decision's folder relative to state/ (from status)")
+    ob.add_argument("file", help="Markdown file with the brief, or - for stdin")
+    orr = ops.add_parser("retry", help="re-run one step that failed in the last cycle for a passing reason (once)")
+    orr.add_argument("target", help="package (repo/path) or repo")
+    orr.add_argument("step", choices=operator.RETRY_STEPS)
+    oq = ops.add_parser("request-retry", help="queue a retry for `run-requests` to carry out (how the agent asks)")
+    oq.add_argument("target")
+    oq.add_argument("step", choices=operator.RETRY_STEPS)
+    ops.add_parser("run-requests", help="carry out the retries the agent queued")
+    oi = ops.add_parser("import-results", help="take the agent's briefs and retry requests from its copy of the state")
+    oi.add_argument("copy", help="the workdir the agent worked on (holding state/)")
+    og = ops.add_parser("guard", help="check the operator's commits in this checkout may become a PR")
+    og.add_argument("--base", default="origin/main", help="what the commits are compared with")
+    op.set_defaults(func=cmd_operator)
 
     c = es.add_parser("cycle", help="the scheduled job: sync, health, scan, propose, digest")
     c.add_argument("--no-propose", action="store_true", help="health and digest only")

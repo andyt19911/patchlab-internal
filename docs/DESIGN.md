@@ -707,9 +707,21 @@ reversal) goes through the same path.
 
 ### M7: the operator agent — proposed
 
-§4.9. First the tool surface (`estate operator status | retry | discover`)
-and its tests, then the workflow with the agent off, then the agent on once
-the credential exists.
+§4.9. Built 2026-09-29: the agent's tools (`estate operator status |
+discover | tools | brief | request-retry | run-requests | import-results |
+guard`), with tests. The cycle now records what failed in `state/cycles/`.
+`not_managed` on a repo lists paths deliberately left out.
+
+Not built yet, waiting on Andy's go-ahead: the workflow steps that run the
+agent. The planned wiring: the agent works on a copy of the state with no repo
+credentials and no way to run code; its briefs and retry requests are
+re-checked on the way back (`import-results`); its change to PatchLab is
+guarded and tested in a job with no secrets; a separate job that runs no repo
+code opens it as a draft PR on an `operator/` branch.
+
+First `discover` on the synced repos: subsovereign's cli, dashboard and eight
+SDKs (sdk-vega has 7 high advisories in the survey), sentinel's dashboard, and
+a Rust crate workspace that sentry's root package already covers.
 
 ## 8. Decisions needed
 
