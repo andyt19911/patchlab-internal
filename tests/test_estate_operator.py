@@ -1,5 +1,6 @@
 """The operator agent's tools: the cycle record, status, retry, briefs, discovery and the guard."""
 
+import contextlib
 import datetime as dt
 import json
 import os
@@ -88,6 +89,10 @@ class CycleAndStatusTests(unittest.TestCase):
 
 class RetryTests(unittest.TestCase):
     def setUp(self):
+        # The lock is POSIX-only (the estate layer runs on Linux); these tests are about retry rules.
+        lock = mock.patch("patchlab_internal.estate.state.exclusive", lambda _d: contextlib.nullcontext())
+        lock.start()
+        self.addCleanup(lock.stop)
         self.est = load()
         operator.record_cycle(self.est, dt.datetime.now(dt.timezone.utc), {"app": "a" * 40}, [
             {"target": "app/backend", "step": "health", "error": "Could not resolve host: registry.npmjs.org"},
