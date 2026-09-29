@@ -339,6 +339,10 @@ class EstateTest(WebTestCase):
         self.assertEqual((d["verdict"], d["kind"], d["has_patch"]), ("READY", "dependency", True))
         self.assertEqual(e["digests"], ["2026-01-01"])
         self.assertEqual(e["publish"], "report-only")
+        self.assertIsNone(e["analysis"])
+        (self.configs / "work" / "state" / "analysis").mkdir()
+        (self.configs / "work" / "state" / "analysis" / "2026-01-01.md").write_text("All quiet.\n")
+        self.assertEqual(self.call("/api/estate")[1]["analysis"], {"date": "2026-01-01", "text": "All quiet.\n"})
 
     def test_decision_and_digest(self):
         _, e, _ = self.call("/api/estate")

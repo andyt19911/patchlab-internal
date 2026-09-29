@@ -124,6 +124,10 @@ def render(estate: Estate, rows: list[dict] | None = None) -> str:
                          f"({', '.join(m['name'] for m in manual[:5])})")
     needs += image_needs
     L += ["## Needs a person", ""] + ([f"- {n}" for n in needs] or ["- Nothing today."]) + [""]
+    from . import analyst
+    report = analyst.latest_report(estate)
+    if report and report[0] == today:
+        L += ["## Analysis", "", report[1].strip(), ""]
 
     L += ["## Packages", "", "| Package | Health | Advisories (in production code; ? = not known) | Code findings (high) "
           "| Proposals |", "|---|---|---|---|---|"]

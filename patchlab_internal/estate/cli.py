@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..config import ConfigError
 from ..sandbox import docker_available
-from . import digest, images, manifest, operator, pipeline, publish, state, workflows
+from . import analyst, digest, images, manifest, operator, pipeline, publish, state, workflows
 
 
 def _estate(args) -> manifest.Estate:
@@ -260,6 +260,23 @@ def cmd_digest(args) -> int:
     return 0
 
 
+def _cycle_step(est: manifest.Estate, pkg: manifest.Package, step: str, no_propose: bool) -> None:
+    if step == "health":
+        h = pipeline.health(est, pkg)
+        if est.repair and h.get("failing") and not no_propose and not pipeline.repaired_already(est, pkg, h):
+            pipeline.repair_and_test(est, pkg)
+        return
+    if pkg.ecosystem in manifest.SCANNERS and not pkg.unsupported:
+        pipeline.scan(est, pkg)
+        if pkg.ecosystem in manifest.PROPOSERS:
+            pipeline.propose_and_test(est, pkg)
+    if not pkg.unsupported:
+        code = pipeline.code_scan(est, pkg)
+        for plan in code["plans"] if est.repair else []:
+            if not pipeline.code_fixed_already(est, pkg, code["commit"], plan["key"]):
+                pipeline.code_fix_and_test(est, pkg, plan["key"], code["commit"])
+
+
 def cmd_cycle(args) -> int:
     """The scheduled job: sync, health (and repair, with a [repair] agent), scan, propose and
     test every fixable advisory, digest."""
@@ -285,7 +302,9 @@ def cmd_cycle(args) -> int:
         est.repos = [r for r in est.repos if r.name in only]
         pipeline.log(f"cycle limited to {', '.join(only)}")
     with state.exclusive(est.state_dir):
-        heads, errors = pipeline.sync(est)
+        progress = analyst.Progress(est, started)       # read live by `estate analyst watch`
+        with progress.step("estate", "sync"):
+            heads, errors = pipeline.sync(est)
         # Code-scanning rules come from the estate's own repos: keep those current too.
         for r in est.all_repos:
             if r.name in rule_repos and r.name not in only:
@@ -303,31 +322,21 @@ def cmd_cycle(args) -> int:
             # One package failing to run never stops the others.
             for step in (["health"] if args.no_propose else ["health", "propose"]):
                 try:
-                    if step == "health":
-                        h = pipeline.health(est, pkg)
-                        if est.repair and h.get("failing") and not args.no_propose \
-                                and not pipeline.repaired_already(est, pkg, h):
-                            pipeline.repair_and_test(est, pkg)
-                    elif pkg.ecosystem in manifest.SCANNERS and not pkg.unsupported:
-                        pipeline.scan(est, pkg)
-                        if pkg.ecosystem in manifest.PROPOSERS:
-                            pipeline.propose_and_test(est, pkg)
-                    if step == "propose" and not pkg.unsupported:
-                        code = pipeline.code_scan(est, pkg)
-                        for plan in code["plans"] if est.repair else []:
-                            if not pipeline.code_fixed_already(est, pkg, code["commit"], plan["key"]):
-                                pipeline.code_fix_and_test(est, pkg, plan["key"], code["commit"])
+                    with progress.step(pkg.id, step):
+                        _cycle_step(est, pkg, step, args.no_propose)
                 except Exception as e:   # recorded in the digest via the missing state, and here
                     failed(pkg.id, step, f"{type(e).__name__}: {e}")
         for repo in est.repos:
             if repo.name in heads:
                 try:
-                    run_actions(est, repo, not args.no_propose, heads[repo.name])
+                    with progress.step(repo.name, "actions"):
+                        run_actions(est, repo, not args.no_propose, heads[repo.name])
                 except Exception as e:
                     failed(repo.name, "actions", f"{type(e).__name__}: {e}")
             if repo.images and repo.name in heads:
                 try:
-                    run_images(est, repo, not args.no_propose, heads[repo.name])
+                    with progress.step(repo.name, "images"):
+                        run_images(est, repo, not args.no_propose, heads[repo.name])
                 except Exception as e:
                     failed(repo.name, "images", f"{type(e).__name__}: {e}")
         if est.publish == "draft-pr" and not args.no_propose:
@@ -338,10 +347,32 @@ def cmd_cycle(args) -> int:
                                      f"{s['result'].get('url') or s['result'].get('why', '')}")
             except Exception as e:
                 failed("estate", "publish", f"{type(e).__name__}: {e}")
-        operator.record_cycle(est, started, heads, failures, no_propose=args.no_propose)
+        progress.finish()
+        operator.record_cycle(est, started, heads, failures, no_propose=args.no_propose,
+                              steps=progress.data["done"])
+        try:
+            analyst.record_metrics(est, started, progress.data["done"])
+        except Exception as e:   # the trend line is a convenience; never fail the cycle for it
+            pipeline.log(f"metrics not recorded: {type(e).__name__}: {e}")
     path = digest.write(est)
     print(path)
     return 2 if failures else 0
+
+
+def cmd_analyst(args) -> int:
+    est = _estate(args)
+    if args.an == "watch":
+        res = analyst.watch(est)
+        print(json.dumps(res, indent=2))
+        return 1 if res.get("looks_stuck") or res.get("died") else 0
+    if args.an == "trends":
+        print(json.dumps(analyst.trends(est, args.days), indent=2))
+    elif args.an == "explain":
+        print(json.dumps(analyst.explain(est, args.package), indent=2))
+    elif args.an == "report":
+        text = Path(args.file).read_text(encoding="utf-8") if args.file != "-" else sys.stdin.read()
+        print(analyst.save_report(est, text))
+    return 0
 
 
 def cmd_operator(args) -> int:
@@ -458,6 +489,17 @@ def register(sub) -> None:
     d = es.add_parser("digest", help="write today's digest from the state directory")
     d.add_argument("-q", "--quiet", action="store_true", help="print only the path")
     d.set_defaults(func=cmd_digest)
+
+    an = es.add_parser("analyst", help="the analyst agent's tools: watch, trends, explain, report")
+    ans = an.add_subparsers(dest="an", required=True)
+    ans.add_parser("watch", help="JSON: the running cycle's step, and whether it looks stuck (exit 1 if so)")
+    at = ans.add_parser("trends", help="JSON: each package's numbers over recent cycles and what moved")
+    at.add_argument("--days", type=int, default=30)
+    ae = ans.add_parser("explain", help="JSON: the evidence for a package's failing tests")
+    ae.add_argument("package")
+    ar = ans.add_parser("report", help="save the analysis for the digest and the Estate page")
+    ar.add_argument("file", help="Markdown file, or - for stdin")
+    an.set_defaults(func=cmd_analyst)
 
     op = es.add_parser("operator", help="the operator agent's tools: status, retry, brief, discover, tools, guard")
     ops = op.add_subparsers(dest="op", required=True)

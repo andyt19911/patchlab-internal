@@ -551,6 +551,8 @@ async function estateView() {
       stat(eol, "images on end-of-life runtimes", eol ? "v-FAIL" : ""), stat(unpinned, "unpinned CI actions", unpinned ? "v-WARN" : "")),
     e.publish !== "draft-pr" ? h("div", { class: "callout info" },
       "Nothing here has been sent to a repository. Each change was tested in a sandbox; publishing as draft PRs is off until it is switched on.") : null,
+    e.analysis ? h("div", { class: "panel" }, h("h2", {}, `Analysis, ${e.analysis.date}`),
+      h("pre", { class: "toml prose" }, e.analysis.text)) : null,
     h("div", { class: "panel" }, h("h2", {}, "Proposed changes"), decisions),
     h("div", { class: "panel" }, h("h2", {}, "Packages"), packages),
     h("div", { class: "two-col" },

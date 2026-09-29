@@ -71,13 +71,13 @@ DOCKERFILE = re.compile(r"(^|/)(Dockerfile(\.[\w.-]+)?|[\w.-]+\.Dockerfile)$")
 # ---------------------------------------------------------------- the cycle record
 
 def record_cycle(estate: Estate, started: dt.datetime, heads: dict[str, str], failures: list[dict],
-                 no_propose: bool = False) -> Path:
+                 no_propose: bool = False, steps: list[dict] | None = None) -> Path:
     stamp = started.strftime("%Y%m%d-%H%M%S")
     data = {"started": started.isoformat(timespec="seconds"),
             "finished": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             "repos": [r.name for r in estate.repos], "heads": heads, "no_propose": no_propose,
             "failures": [{**f, "transient": bool(TRANSIENT.search(f["error"]))} for f in failures],
-            "retries": []}
+            "retries": [], "steps": steps or []}
     return state.write_json(estate.state_dir / CYCLES / f"{stamp}.json", data)
 
 

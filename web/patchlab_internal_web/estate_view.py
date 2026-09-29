@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from patchlab_internal.estate import digest, manifest, state
+from patchlab_internal.estate import analyst, digest, manifest, state
 
 from . import store
 
@@ -105,10 +105,12 @@ def overview(est: manifest.Estate) -> dict:
     order = {"READY": 0, "REVIEW": 1, "BLOCKED": 2, "INCONCLUSIVE": 3}
     decisions.sort(key=lambda d: (order.get(d["verdict"], 9), d["where"], d["key"]))
     published = state.read_json(est.state_dir / "published.json", {}) or {}
+    report = analyst.latest_report(est)
     return {"manifest": str(est.path), "state_dir": str(est.state_dir), "publish": est.publish,
             "repos": [r.name for r in est.repos], "packages": packages, "images": images,
             "workflows": workflows, "decisions": decisions, "digests": digests,
-            "published": [{"branch": b, "url": v.get("url")} for b, v in sorted(published.items())]}
+            "published": [{"branch": b, "url": v.get("url")} for b, v in sorted(published.items())],
+            "analysis": {"date": report[0], "text": report[1][:MAX_TEXT]} if report else None}
 
 
 def decision(est: manifest.Estate, rel: str) -> dict:

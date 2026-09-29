@@ -516,6 +516,44 @@ tools it's given, not by its instructions:
 repository secret. Without it the workflow runs `status` and stops, so the
 nightly summary still shows what the agent would have picked up.
 
+### 4.10 The analyst agent (M8, tools built)
+
+The operator (§4.9) looks after PatchLab. The analyst looks after the work
+PatchLab does each night: it starts the cycle, watches it while it runs, and
+reads what came out, so that a stuck run, a slow creep or a new failure is
+noticed and explained the same night, not found by a person scrolling a digest.
+
+**While the cycle runs.** The cycle writes `state/progress.json` as it goes:
+the step in hand (package or repo, step, since when) and each finished step's
+time and outcome. `estate analyst watch` compares the running step with the
+median of the same step in the last 30 cycles and says whether it looks stuck
+(three times its usual time and at least 20 minutes over, or two hours with no
+history), or whether the cycle's process died without finishing. The analyst
+checks it on a schedule while the cycle runs and reports a stuck step, so a
+person or the operator can act.
+
+**After the cycle.** Each cycle appends one line per package to
+`state/metrics.jsonl`: health, passing and failing tests, flaky tests,
+advisories (all and in production code), high code findings, and time taken.
+`estate analyst trends` names what moved: tests that started failing or
+stopped running, advisories that appeared, a package that took far longer than
+usual, a test that has been flaky more than once. `estate analyst explain
+PACKAGE` gathers the evidence for a package's failures: each failing test's
+log excerpt, when it last passed, the commits since, and its flaky history.
+
+**What it writes.** One analysis per night, saved with `estate analyst
+report` into `state/analysis/`, shown at the top of the digest and on the
+Estate page. It leads with what needs a person, then explains each change
+from the evidence: for example, that a newly failing test broke at a named
+commit, or that a slowdown came from one check. It never changes a decision,
+re-runs work (that is the operator's, through its bounded retry) or writes to
+a repo.
+
+**How it runs.** Like the operator: in the nightly workflow, with no repo
+credentials and no way to run code, on a copy of the state. Its tools are
+`estate analyst watch | trends | explain | report` and the operator's
+`status`. It needs the same agent credential.
+
 ## 5. Security
 
 ### 5.1 Access
@@ -722,6 +760,13 @@ code opens it as a draft PR on an `operator/` branch.
 First `discover` on the synced repos: subsovereign's cli, dashboard and eight
 SDKs (sdk-vega has 7 high advisories in the survey), sentinel's dashboard, and
 a Rust crate workspace that sentry's root package already covers.
+
+### M8: the analyst agent — tools built
+
+§4.10. Built 2026-09-29: progress, step timings and metrics written by every
+cycle, and `estate analyst watch | trends | explain | report`, with tests; the
+analysis in the digest and on the Estate page. The workflow steps that run the
+analyst wait, with the operator's, for Andy's go-ahead.
 
 ## 8. Decisions needed
 
