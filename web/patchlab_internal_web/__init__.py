@@ -9,6 +9,7 @@ report files they write. Enable it with `patchlab-internal setup --web` or
 __version__ = "0.1.0"
 
 
-def serve(settings, host=None, port=None, open_browser=False, allow_remote=False) -> int:
+def serve(settings, host=None, port=None, open_browser=False, allow_remote=False, estate=None) -> int:
     from .server import serve as _serve
-    return _serve(settings, host=host, port=port, open_browser=open_browser, allow_remote=allow_remote)
+    return _serve(settings, host=host, port=port, open_browser=open_browser, allow_remote=allow_remote,
+                  estate=estate)

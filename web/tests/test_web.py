@@ -268,6 +268,13 @@ class RunTest(WebTestCase):
 
 
 class ServeTest(unittest.TestCase):
+    def test_package_entry_point_passes_every_option(self):
+        # The CLI calls patchlab_internal_web.serve, a thin wrapper over server.serve.
+        import inspect
+        import patchlab_internal_web
+        self.assertEqual(list(inspect.signature(patchlab_internal_web.serve).parameters)[1:],
+                         list(inspect.signature(server.serve).parameters)[1:])
+
     def test_refuses_public_address_without_opt_in(self):
         s = core_settings.Settings(reports_dir=tempfile.mkdtemp())
         self.assertEqual(server.serve(s, host="0.0.0.0", port=0), 64)
