@@ -92,16 +92,17 @@ jobs:
         with:
           path: ${{ env.PATCHLAB_INTERNAL_ESTATE_WORKDIR }}/state
           key: estate-state-${{ github.run_id }}
-      - name: Upload digest and decisions
+      # The results without the raw test logs; unzipped into a folder named state,
+      # the web front end's Estate page shows them (web/README.md).
+      - name: Upload the results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: estate-${{ github.run_id }}
           path: |
-            digest.md
-            ${{ env.PATCHLAB_INTERNAL_ESTATE_WORKDIR }}/state/**/decision.json
-            ${{ env.PATCHLAB_INTERNAL_ESTATE_WORKDIR }}/state/**/pr.md
-            ${{ env.PATCHLAB_INTERNAL_ESTATE_WORKDIR }}/state/**/change.patch
+            ${{ env.PATCHLAB_INTERNAL_ESTATE_WORKDIR }}/state
+            !${{ env.PATCHLAB_INTERNAL_ESTATE_WORKDIR }}/state/**/runs/**
+            !${{ env.PATCHLAB_INTERNAL_ESTATE_WORKDIR }}/state/.lock
           retention-days: 30
           if-no-files-found: warn
       - name: Leave nothing running

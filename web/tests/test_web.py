@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -272,6 +273,95 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(server.serve(s, host="0.0.0.0", port=0), 64)
 
 
+ESTATE = """
+[estate]
+workdir = "work"
+
+[[repo]]
+name = "app"
+url = "https://github.com/Org/app"
+
+  [[repo.package]]
+  path = "backend"
+  ecosystem = "npm"
+  image = "node:24-bookworm"
+
+    [[repo.package.checks]]
+    name = "unit"
+    run = "npm test"
+"""
+
+
+def write_estate_state(configs: Path) -> Path:
+    """A small estate: one healthy package, one READY proposal with a hostile title, one digest."""
+    (configs / "estate.toml").write_text(ESTATE)
+    st = configs / "work" / "state"
+    health = st / "app-backend" / "health" / "20260101-000000-health-aaaa"
+    health.mkdir(parents=True)
+    (health / "summary.json").write_text(json.dumps({"status": "healthy", "passing_tests": 12, "commit": "c" * 40}))
+    (st / "app-backend" / "scan.json").write_text(json.dumps({"commit": "c" * 40, "scan": {"vulnerable": [
+        {"name": "nodemailer", "production": True}]}}))
+    run = st / "app-backend" / "proposals" / "nodemailer" / "20260101-000100-proposal-bbbb"
+    run.mkdir(parents=True)
+    (run / "decision.json").write_text(json.dumps({"verdict": "READY", "summary": "safe", "labels": ["security"],
+        "gate": [{"name": "checks pass", "ok": True, "detail": "12 of 12", "details": [], "kind": "blocker"}]}))
+    (run / "proposal.json").write_text(json.dumps({"commit": "c" * 40,
+                                                   "plan": {"title": "<img src=x onerror=alert(1)> bump"}}))
+    (run / "pr.md").write_text("## Why\nnodemailer advisory\n")
+    (run / "change.patch").write_text("--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-\"6.9.0\"\n+\"9.1.1\"\n")
+    (st / "digest").mkdir()
+    (st / "digest" / "2026-01-01.md").write_text("# Estate digest, 2026-01-01\n")
+    (st / "outside.json").write_text("{}")
+    return run
+
+
+class EstateTest(WebTestCase):
+    def setUp(self):
+        super().setUp()
+        self.run = write_estate_state(self.configs)
+        # The front end found estate.toml in the configs folder at start-up.
+        self.app.estate_manifest = self.configs / "estate.toml"
+
+    def test_overview_lists_packages_and_decisions(self):
+        status, e, _ = self.call("/api/estate")
+        self.assertEqual(status, 200)
+        self.assertEqual([p["id"] for p in e["packages"]], ["app/backend"])
+        self.assertEqual(e["packages"][0]["health"], "healthy")
+        self.assertEqual(e["packages"][0]["advisories_production"], 1)
+        [d] = e["decisions"]
+        self.assertEqual((d["verdict"], d["kind"], d["has_patch"]), ("READY", "dependency", True))
+        self.assertEqual(e["digests"], ["2026-01-01"])
+        self.assertEqual(e["publish"], "report-only")
+
+    def test_decision_and_digest(self):
+        _, e, _ = self.call("/api/estate")
+        status, x, _ = self.call(f"/api/estate/decision?id={urllib.parse.quote(e['decisions'][0]['id'])}")
+        self.assertEqual(status, 200)
+        self.assertIn("+\"9.1.1\"", x["patch"])
+        self.assertIn("nodemailer advisory", x["pr"])
+        status, x, _ = self.call("/api/estate/digest?date=2026-01-01")
+        self.assertEqual((status, x["text"].splitlines()[0]), (200, "# Estate digest, 2026-01-01"))
+
+    def test_reads_stay_inside_the_state_folder(self):
+        for bad in ("../estate.toml", "../../configs", "/etc", "outside.json", "app-backend"):
+            self.assertEqual(self.call(f"/api/estate/decision?id={urllib.parse.quote(bad)}")[0], 404, bad)
+        for bad in ("../../estate", "..%2F..%2Festate", "2026-01-02"):
+            self.assertEqual(self.call(f"/api/estate/digest?date={bad}")[0], 404, bad)
+        self.assertEqual(self.call("/api/estate", token=None)[0], 401)
+
+    def test_no_manifest_is_explained(self):
+        self.app.estate_manifest = None
+        status, body, _ = self.call("/api/estate")
+        self.assertEqual(status, 404)
+        self.assertIn("--estate", body["error"])
+
+    def test_manifest_lookup_order(self):
+        from patchlab_internal_web import estate_view
+        self.assertEqual(estate_view.find_manifest(None, self.configs), self.configs / "estate.toml")
+        self.assertEqual(estate_view.find_manifest(str(self.tmp / "x.toml"), self.configs), (self.tmp / "x.toml").resolve())
+        self.assertIsNone(estate_view.find_manifest(None, self.tmp))
+
+
 try:
     from playwright.sync_api import sync_playwright
 except ImportError:
@@ -308,6 +398,16 @@ class BrowserTest(WebTestCase):
             page.goto(f"{self.base}/#/runs/20260101-120000-beef")
             page.wait_for_selector(".finding")
             self.assertIn("<img src=x onerror=alert(1)>", page.inner_text(".finding"))   # shown as text, not HTML
+            write_estate_state(self.configs)
+            self.app.estate_manifest = self.configs / "estate.toml"
+            page.goto(f"{self.base}/#/estate")
+            page.wait_for_selector("tr.link")
+            self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390, "estate")
+            page.click("tr.link")
+            page.wait_for_selector("pre.diff .add")
+            self.assertIn("<img src=x onerror=alert(1)>", page.inner_text("h1"))
+            page.goto(f"{self.base}/#/estate/digest?date=2026-01-01")
+            page.wait_for_selector("pre.prose")
             browser.close()
         self.assertEqual(errors, [])
 

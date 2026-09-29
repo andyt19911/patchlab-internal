@@ -36,6 +36,17 @@ browser, writes its report) and the **configs folder** (where the front end look
 `.toml` configs). Settings live in `~/.config/patchlab_internal/settings.toml`
 (`%APPDATA%\PatchLabInternal\settings.toml` on Windows, or `$PATCHLAB_INTERNAL_HOME`).
 
+## Estate results
+
+The **Estate** page shows what `patchlab-internal estate` found and proposed: package health,
+advisories and code findings, container images, CI workflows, and every tested change with its
+gate, pull request text and patch. It is read-only and reads the estate's `state/` folder, so it
+never scans, publishes or touches a managed repo. Point it at the manifest with
+`patchlab-internal web --estate estate.toml` (or `PATCHLAB_INTERNAL_ESTATE_MANIFEST`, or put
+`estate.toml` in the configs folder). To review a nightly GitHub Actions run, download its
+`estate-<run id>` artifact, unzip it into a folder named `state`, and start the front end with
+`PATCHLAB_INTERNAL_ESTATE_WORKDIR` set to the folder that holds `state`.
+
 ## Security
 
 The front end can start runs that clone production systems with the credentials of the
@@ -71,6 +82,8 @@ The UI is a thin client over a small JSON API, handy for scripts. Authenticate w
 | GET | `/api/configs`, `/api/config?path=` | list and inspect configs |
 | POST | `/api/gc` | `{config}`: remove leftovers for that config's provider |
 | GET | `/api/environment`, `/api/session` | tools, settings, versions |
+| GET | `/api/estate` | estate results: packages, images, CI workflows, every decision |
+| GET | `/api/estate/decision?id=`, `/api/estate/digest?date=` | one decision's gate, PR text and patch; a digest |
 | GET | `/files/<id>/<path>` | report files and logs |
 
 ## Tests

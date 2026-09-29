@@ -155,7 +155,7 @@ def _cmd_web(args) -> int:
         print("error: the web front end is not installed: pip install ./web", file=sys.stderr)
         return 64
     return web.serve(s, host=args.host, port=args.port, open_browser=args.open,
-                     allow_remote=args.allow_remote)
+                     allow_remote=args.allow_remote, estate=args.estate)
 
 
 def _cmd_gc(args) -> int:
@@ -224,6 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--open", action="store_true", help="open the browser")
     w.add_argument("--allow-remote", action="store_true",
                    help="allow listening on a non-loopback address (access still needs the token)")
+    w.add_argument("--estate", metavar="PATH", help="estate.toml whose results the Estate page shows "
+                   "(default: $PATCHLAB_INTERNAL_ESTATE_MANIFEST, then estate.toml in the configs folder)")
     w.set_defaults(func=_cmd_web)
 
     g = sub.add_parser("gc", help="remove leftover sandboxes from crashed/killed runs")
