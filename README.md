@@ -338,9 +338,3 @@ patchlab_internal/
   web/                  OPTIONAL front end package (patchlab_internal_web): server, static UI, tests
   tests/                unit and integration tests
 ```
-
-## Licence
-
-Proprietary, internal use only; see [LICENSE](LICENSE). Not for distribution
-outside MIIMAGINELabs. The bundled example library in `examples/urlkit` keeps
-its own MIT licence.
